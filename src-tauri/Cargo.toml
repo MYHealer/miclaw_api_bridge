@@ -1,0 +1,69 @@
+[package]
+name = "mimo-bridge"
+version = "0.1.0"
+description = "Bridge Xiaomi mimo LLM into local OpenAI / Claude compatible APIs"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "mimo_bridge_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+# tauri runtime
+tauri = { version = "2.1", features = [] }
+tauri-plugin-shell = "2.0"
+tauri-plugin-dialog = "2.0"
+tauri-plugin-clipboard-manager = "2.0"
+
+# async runtime
+tokio = { version = "1.41", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+futures-util = "0.3"
+
+# http client / cookies
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "cookies", "gzip"] }
+reqwest_cookie_store = "0.8"
+cookie_store = "0.21"
+url = "2.5"
+
+# http server (axum proxy)
+axum = { version = "0.7", features = ["json", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+hyper = "1.5"
+
+# json / serde
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# crypto / encoding
+md-5 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+aes-gcm = "0.10"
+rand = "0.8"
+
+# storage
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "linux-native-async-persistent"] }
+directories = "5.0"
+
+# misc
+thiserror = "2.0"
+anyhow = "1.0"
+once_cell = "1.20"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.11", features = ["v4"] }
+parking_lot = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+bytes = "1.8"
+
+[features]
+default = []
+custom-protocol = ["tauri/custom-protocol"]
