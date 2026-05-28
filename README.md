@@ -53,9 +53,12 @@ Eight models are exposed, all routed through the official Xiaomi PC channel:
 
 ### From a release
 
-1. Grab the `.dmg` (Apple Silicon) from the [Releases](../../releases) page
-2. Drag **miclaw_api_bridge.app** to `/Applications`
-3. Launch, sign in with your miclaw-permissioned Xiaomi account
+1. Grab the installer for your platform from the [Releases](../../releases) page:
+   - macOS: `.dmg` universal build for Apple Silicon and Intel
+   - Windows: `.msi`
+   - Linux: `.AppImage`
+2. Install or launch **miclaw_api_bridge**
+3. Sign in with your miclaw-permissioned Xiaomi account
 4. Open the **Dashboard** tab and click **Start** — proxy is now listening on `127.0.0.1:8765`
 
 > First launch on macOS: right-click → Open to bypass Gatekeeper (the app isn't notarized).
@@ -106,10 +109,25 @@ Prerequisites: Rust 1.77+, Node.js 20+, pnpm 9+.
 git clone <this-repo> miclaw_api_bridge && cd miclaw_api_bridge
 pnpm install
 pnpm tauri dev          # run in dev mode
-pnpm tauri build        # produce a .dmg / .msi / .AppImage
+pnpm tauri build        # produce the native bundle for the current OS
 ```
 
 The signed bundle ends up in `src-tauri/target/release/bundle/`.
+
+### Release automation
+
+Pushing a version tag builds a draft GitHub Release with platform installers:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow produces:
+
+- macOS universal `.dmg`
+- Windows x64 `.msi`
+- Linux x64 `.AppImage`
 
 ### Tests
 
@@ -211,9 +229,9 @@ Not yet. Tracking under [#multi-account](../../issues).
 - [x] Live log panel
 - [x] Keychain-backed credential storage
 - [x] macOS dmg packaging
-- [ ] Universal macOS binary (Intel + Apple Silicon)
+- [x] Universal macOS binary (Intel + Apple Silicon)
 - [ ] Code signing & notarization
-- [ ] Windows / Linux release pipeline
+- [x] Windows / Linux release pipeline
 - [ ] Multi-account support
 - [ ] Optional rate-limit / quota dashboard
 
