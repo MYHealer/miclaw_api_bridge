@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
+import { RouterLink } from "vue-router";
 import { api, AuthSnapshot, ModelInfo, ProxySnapshot } from "../api";
 
 const auth = ref<AuthSnapshot | null>(null);
@@ -8,6 +9,13 @@ const models = ref<ModelInfo[]>([]);
 const portInput = ref<number>(8765);
 const busy = ref(false);
 const err = ref("");
+
+const proxyBase = computed(() => `http://127.0.0.1:${proxy.value?.port ?? 8765}`);
+const health = computed(() => {
+  if (!auth.value?.authenticated) return { label: "账号未登录", tone: "bad" };
+  if (!proxy.value?.running) return { label: "代理已停止", tone: "warn" };
+  return { label: "Ready", tone: "ok" };
+});
 
 async function refreshAll() {
   err.value = "";
@@ -63,54 +71,122 @@ onMounted(refreshAll);
 </script>
 
 <template>
-  <h1>概览</h1>
-  <p v-if="err" class="tag bad">{{ err }}</p>
+  <p v-if="err" class="notice bad">{{ err }}</p>
 
-  <section class="card">
-    <h2>本地代理</h2>
-    <div class="row">
-      <span class="tag" :class="proxy?.running ? 'ok' : 'warn'">
-        {{ proxy?.running ? `运行中 ${proxy.addr ?? ''}` : "已停止" }}
-      </span>
-      <div class="grow"></div>
-      <button :disabled="busy" @click="toggleProxy">
-        {{ proxy?.running ? "停止" : "启动" }}
-      </button>
+  <section class="status-strip" aria-label="运行状态">
+    <div>
+      <span class="label">Bridge</span>
+      <strong :class="['signal', health.tone]">{{ health.label }}</strong>
     </div>
-    <div class="row">
-      <div class="grow">
-        <label>监听端口</label>
-        <input type="number" v-model.number="portInput" min="1024" max="65535" />
+    <div>
+      <span class="label">Account</span>
+      <strong>{{ auth?.authenticated ? auth.nick ?? auth.user_id ?? "已登录" : "未登录" }}</strong>
+    </div>
+    <div>
+      <span class="label">Port</span>
+      <strong>{{ proxy?.port ?? 8765 }}</strong>
+    </div>
+    <div>
+      <span class="label">Models</span>
+      <strong>{{ models.length || "—" }}</strong>
+    </div>
+  </section>
+
+  <section class="panel proxy-panel">
+    <div class="panel-heading">
+      <p class="section-number">02</p>
+      <div>
+        <h2>本地代理</h2>
+        <p>启动后，任何 OpenAI / Claude 兼容客户端都可以连到本机。</p>
       </div>
-      <button class="ghost" :disabled="busy" @click="applyPort">应用</button>
     </div>
-    <p class="muted">
-      OpenAI 客户端 baseURL：<code>http://127.0.0.1:{{ proxy?.port ?? 8765 }}/v1</code><br />
-      Anthropic 客户端 baseURL：<code>http://127.0.0.1:{{ proxy?.port ?? 8765 }}</code><br />
-      <span class="muted">无需 API Key（任意字符串即可）。</span>
-    </p>
-  </section>
 
-  <section class="card">
-    <h2>账号</h2>
-    <div class="row">
-      <span class="tag" :class="auth?.authenticated ? 'ok' : 'bad'">
-        {{ auth?.authenticated ? `已登录 ${auth.nick ?? auth.user_id ?? ''}` : "未登录" }}
-      </span>
-      <div class="grow"></div>
-      <button class="ghost" :disabled="busy || !auth?.authenticated" @click="refreshAuth">
-        刷新令牌
+    <div class="proxy-actions">
+      <button class="primary-action" :disabled="busy" @click="toggleProxy">
+        {{ proxy?.running ? "停止代理" : "启动代理" }}
       </button>
-      <button class="danger" :disabled="busy || !auth?.authenticated" @click="logout">退出</button>
+      <div class="port-control">
+        <label for="proxy-port">
+          <span>监听端口</span>
+          <input id="proxy-port" type="number" v-model.number="portInput" min="1024" max="65535" />
+        </label>
+        <button class="line-action" :disabled="busy" @click="applyPort">应用</button>
+      </div>
+    </div>
+
+    <div class="endpoint-grid">
+      <div>
+        <span class="label">OpenAI</span>
+        <code>{{ proxyBase }}/v1</code>
+      </div>
+      <div>
+        <span class="label">Responses</span>
+        <code>{{ proxyBase }}/v1/responses</code>
+      </div>
+      <div>
+        <span class="label">Anthropic</span>
+        <code>{{ proxyBase }}</code>
+      </div>
+      <div>
+        <span class="label">API Key</span>
+        <code>任意字符串</code>
+      </div>
     </div>
   </section>
 
-  <section class="card">
-    <h2>可用模型</h2>
-    <ul>
-      <li v-for="m in models" :key="m.id">
-        <code>{{ m.id }}</code> <span class="muted">— {{ m.family }}</span>
-      </li>
-    </ul>
+  <section class="split-panels">
+    <article class="panel">
+      <div class="panel-heading compact">
+        <p class="section-number">03</p>
+        <div>
+          <h2>账号</h2>
+          <p>serviceToken 过期时会自动刷新，也可以手动触发。</p>
+        </div>
+      </div>
+      <div class="account-row">
+        <span :class="['state-line', auth?.authenticated ? 'ok' : 'bad']">
+          {{ auth?.authenticated ? "已认证" : "未认证" }}
+        </span>
+        <button class="line-action" :disabled="busy || !auth?.authenticated" @click="refreshAuth">
+          刷新令牌
+        </button>
+        <button class="line-action danger" :disabled="busy || !auth?.authenticated" @click="logout">
+          退出
+        </button>
+      </div>
+      <RouterLink v-if="!auth?.authenticated" class="arrow-link" to="/login">去登录</RouterLink>
+    </article>
+
+    <article class="panel">
+      <div class="panel-heading compact">
+        <p class="section-number">04</p>
+        <div>
+          <h2>协议</h2>
+          <p>Chat Completions 透传，Messages 和 Responses 做兼容转换。</p>
+        </div>
+      </div>
+      <ul class="protocol-list">
+        <li><span>Chat</span><code>/v1/chat/completions</code></li>
+        <li><span>Responses</span><code>/v1/responses</code></li>
+        <li><span>Anthropic</span><code>/v1/messages</code></li>
+      </ul>
+    </article>
+  </section>
+
+  <section class="panel">
+    <div class="panel-heading">
+      <p class="section-number">05</p>
+      <div>
+        <h2>可用模型</h2>
+        <p>以下模型已在 PC osbotapi 通道验证。</p>
+      </div>
+    </div>
+    <div class="model-table">
+      <div v-for="(m, index) in models" :key="m.id" class="model-row">
+        <span class="row-index">{{ String(index + 1).padStart(2, "0") }}</span>
+        <code>{{ m.id }}</code>
+        <span>{{ m.family }}</span>
+      </div>
+    </div>
   </section>
 </template>

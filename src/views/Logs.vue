@@ -18,6 +18,25 @@ const max = 500;
 let unlisten: UnlistenFn | null = null;
 
 onMounted(async () => {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    rows.value = [
+      {
+        ts: Date.now(),
+        kind: "request",
+        path: "/osbot/pc/llm/v1/chat/completions",
+        model: "mimo-pro",
+        stream: true,
+      },
+      {
+        ts: Date.now() - 42,
+        kind: "response",
+        path: "/osbot/pc/llm/v1/responses",
+        status: 200,
+        elapsed_ms: 1180,
+      },
+    ];
+    return;
+  }
   unlisten = await listen<LogRow>("proxy-log", (e) => {
     rows.value.unshift(e.payload);
     if (rows.value.length > max) rows.value.length = max;
@@ -42,46 +61,51 @@ function tagClass(kind: string, status?: number) {
   return "warn";
 }
 
+function logLabel(r: LogRow) {
+  if (r.kind === "request") return "request";
+  if (r.kind === "response") return `status ${r.status ?? "—"}`;
+  return "error";
+}
+
 function clear() {
   rows.value = [];
 }
 </script>
 
 <template>
-  <h1>日志</h1>
-  <p class="muted">
-    实时显示本地代理收到的请求与响应（不记录任何请求体或响应体内容）。
-  </p>
-
-  <section class="card">
-    <div class="row">
-      <span class="tag warn">{{ rows.length }} 条</span>
-      <div class="grow"></div>
-      <button class="ghost" @click="clear">清空</button>
+  <section class="panel logs-head">
+    <div class="panel-heading">
+      <p class="section-number">02</p>
+      <div>
+        <h2>实时事件</h2>
+        <p>仅记录代理元数据，不记录 prompt、响应正文或 token 内容。</p>
+      </div>
+    </div>
+    <div class="log-toolbar">
+      <span class="state-line warn">{{ rows.length }} / {{ max }}</span>
+      <button class="line-action" @click="clear">清空</button>
     </div>
   </section>
 
-  <section class="card" v-if="rows.length === 0">
-    <p class="muted">还没有请求。启动代理并用 OpenAI / Anthropic 客户端连接 :8765 试试。</p>
+  <section class="panel empty-state" v-if="rows.length === 0">
+    <span class="section-number">03</span>
+    <h2>等待请求</h2>
+    <p>启动代理后，用 OpenAI、Responses 或 Anthropic 客户端连接本地端口。</p>
   </section>
 
-  <section class="card" v-for="(r, i) in rows" :key="i">
-    <div class="row">
-      <span class="tag" :class="tagClass(r.kind, r.status)">
-        {{ r.kind === "response" ? `↩ ${r.status ?? ""}` : r.kind === "request" ? "→" : "✗" }}
-      </span>
-      <code class="grow">{{ r.path }}</code>
+  <section v-else class="log-list" aria-label="代理日志列表">
+    <article class="log-row" v-for="(r, i) in rows" :key="i">
+      <span class="row-index">{{ String(i + 1).padStart(2, "0") }}</span>
+      <span :class="['state-line', tagClass(r.kind, r.status)]">{{ logLabel(r) }}</span>
+      <code>{{ r.path || "—" }}</code>
       <span class="muted">{{ fmtTime(r.ts) }}</span>
-    </div>
-    <div class="row" v-if="r.kind === 'request'">
-      <span class="muted">model={{ r.model || "—" }} stream={{ r.stream ? "true" : "false" }}</span>
-    </div>
-    <div class="row" v-if="r.kind === 'response'">
-      <span class="muted">耗时 {{ r.elapsed_ms ?? "—" }}ms</span>
-    </div>
-    <div class="row" v-if="r.kind === 'error'">
-      <span class="tag bad">{{ r.message }}</span>
-      <span class="muted">耗时 {{ r.elapsed_ms ?? "—" }}ms</span>
-    </div>
+      <span v-if="r.kind === 'request'" class="muted">
+        model={{ r.model || "—" }} · stream={{ r.stream ? "true" : "false" }}
+      </span>
+      <span v-else-if="r.kind === 'response'" class="muted">
+        {{ r.elapsed_ms ?? "—" }}ms
+      </span>
+      <span v-else class="muted">{{ r.message }} · {{ r.elapsed_ms ?? "—" }}ms</span>
+    </article>
   </section>
 </template>
