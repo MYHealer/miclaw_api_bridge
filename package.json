@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:linux-appimage": "bash scripts/build-linux-appimage.sh",
+    "build:windows-nsis": "bash scripts/build-windows-nsis.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",

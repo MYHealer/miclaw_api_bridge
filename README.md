@@ -129,6 +129,26 @@ The release workflow produces:
 - Windows x64 `.msi`
 - Linux x64 `.AppImage`
 
+### Local cross builds
+
+You can build Linux AppImage locally from macOS with Docker:
+
+```bash
+pnpm build:linux-appimage
+```
+
+The AppImage is copied to `target-local/linux-appimage/`.
+
+For Windows, `.msi` still requires a Windows host because WiX only runs on Windows. From macOS/Linux you can build a Windows NSIS `setup.exe` instead:
+
+```bash
+cargo install --locked cargo-xwin
+brew install nsis llvm
+pnpm build:windows-nsis
+```
+
+The NSIS installer is written to `src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/`.
+
 ### Tests
 
 ```bash
