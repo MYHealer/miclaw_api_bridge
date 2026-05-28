@@ -106,7 +106,30 @@ impl MimoClient {
 
     /// Forward a JSON body to mimo. Streaming is requested by the JSON body
     /// itself (`"stream": true`); upstream returns SSE in that case.
+    ///
+    /// On a 401 we transparently re-run the osbotapi token swap (the mimo
+    /// PC token has a short TTL — minutes — and `passToken` is what's
+    /// long-lived) and replay the request once.
     pub async fn post_json(&self, path: &str, body: Value) -> Result<reqwest::Response> {
+        let resp = self.post_json_once(path, body.clone()).await?;
+        if resp.status() != reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(resp);
+        }
+        tracing::warn!(target = "mimo", "{path} got 401, refreshing serviceToken via osbotapi swap");
+        let _ = resp.bytes().await; // drain
+        match self.refresh_service_token().await {
+            Ok(()) => {
+                tracing::info!(target = "mimo", "serviceToken refreshed, retrying once");
+                self.post_json_once(path, body).await
+            }
+            Err(e) => {
+                tracing::warn!(target = "mimo", "swap failed during 401 refresh: {e}");
+                Err(BridgeError::NotAuthenticated)
+            }
+        }
+    }
+
+    async fn post_json_once(&self, path: &str, body: Value) -> Result<reqwest::Response> {
         let session = self.snapshot()?;
         let (client, _) = build_http_client(&session)?;
         let headers = self.build_headers(&session)?;
@@ -131,6 +154,22 @@ impl MimoClient {
             .send()
             .await?;
         Ok(resp)
+    }
+
+    /// Re-runs the osbotapi swap using the persisted passToken to mint a
+    /// fresh serviceToken. Returns `Err(NotAuthenticated)` if passToken
+    /// itself is gone (forces the user back to a full login).
+    async fn refresh_service_token(&self) -> Result<()> {
+        let session = self.auth.read().session.clone();
+        if session.pass_token.is_none() {
+            return Err(BridgeError::NotAuthenticated);
+        }
+        // The swap doesn't actually use the dummy first arg.
+        let dummy = reqwest::Client::new();
+        let next = crate::auth::login::swap_to_osbotapi_token(&dummy, session).await?;
+        let mut guard = self.auth.write();
+        guard.session = next;
+        Ok(())
     }
 
     pub async fn post_stream(

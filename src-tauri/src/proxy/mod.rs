@@ -5,8 +5,11 @@ mod anthropic;
 mod openai;
 mod transport;
 
+pub use transport::emit_log;
+
 use crate::error::{BridgeError, Result};
 use crate::mimo::MimoClient;
+use crate::state::LogEmitter;
 use crate::storage::Storage;
 use axum::{routing::get, routing::post, Router};
 use parking_lot::Mutex;
@@ -17,6 +20,7 @@ use tower_http::cors::CorsLayer;
 
 pub struct ProxyController {
     pub mimo: Arc<MimoClient>,
+    pub emitter: LogEmitter,
     storage: Arc<Storage>,
     state: Mutex<RuntimeState>,
 }
@@ -29,9 +33,10 @@ struct RuntimeState {
 }
 
 impl ProxyController {
-    pub fn new(mimo: Arc<MimoClient>, storage: Arc<Storage>) -> Self {
+    pub fn new(mimo: Arc<MimoClient>, storage: Arc<Storage>, emitter: LogEmitter) -> Self {
         Self {
             mimo,
+            emitter,
             storage,
             state: Mutex::new(RuntimeState::default()),
         }

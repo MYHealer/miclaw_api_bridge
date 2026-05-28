@@ -54,11 +54,32 @@ pub async fn messages(
         .and_then(|v| v.as_str())
         .unwrap_or(crate::mimo::MODEL_DEFAULT)
         .to_string();
+    let started = std::time::Instant::now();
+    super::emit_log(
+        &ctrl,
+        json!({
+            "ts": chrono::Utc::now().timestamp_millis(),
+            "kind": "request",
+            "path": "/v1/messages",
+            "model": model.clone(),
+            "stream": stream_requested,
+        }),
+    );
 
     match ctrl.mimo.chat(openai_body).await {
         Ok(upstream) => {
             let status =
                 StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            super::emit_log(
+                &ctrl,
+                json!({
+                    "ts": chrono::Utc::now().timestamp_millis(),
+                    "kind": "response",
+                    "path": "/v1/messages",
+                    "status": status.as_u16(),
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                }),
+            );
             if !status.is_success() {
                 let text = upstream.text().await.unwrap_or_default();
                 return (status, text).into_response();
@@ -69,7 +90,19 @@ pub async fn messages(
                 aggregate_anthropic(upstream, model).await
             }
         }
-        Err(e) => map_err(e),
+        Err(e) => {
+            super::emit_log(
+                &ctrl,
+                json!({
+                    "ts": chrono::Utc::now().timestamp_millis(),
+                    "kind": "error",
+                    "path": "/v1/messages",
+                    "message": e.to_string(),
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                }),
+            );
+            map_err(e)
+        }
     }
 }
 
@@ -763,3 +796,158 @@ impl Stream for SseTranslator {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: feed a sequence of OpenAI-style chunks into the translator
+    /// and return the concatenated Anthropic SSE output.
+    fn run(chunks: &[Value]) -> String {
+        let model = "mimo-omni".to_string();
+        // The Stream impl drives via `pop_event` over a buffer of bytes;
+        // for a unit test we exercise `translate` and `finish` directly.
+        let inner = futures::stream::empty().boxed();
+        let mut t = SseTranslator::new(inner, model);
+        let mut out: Vec<String> = Vec::new();
+        for c in chunks {
+            out.extend(t.translate(&c.to_string()));
+        }
+        t.finish(&mut out);
+        out.concat()
+    }
+
+    fn count_event(haystack: &str, needle: &str) -> usize {
+        haystack.matches(&format!("event: {needle}\n")).count()
+    }
+
+    #[test]
+    fn anthropic_text_stream_basic() {
+        // mimo emits: empty role chunk → reasoning_content delta → content delta → finish
+        let chunks = vec![
+            json!({
+                "id": "abc", "model": "mimo",
+                "choices": [{"delta": {"role": "assistant", "content": ""}, "finish_reason": null, "index": 0}],
+            }),
+            json!({
+                "id": "abc",
+                "choices": [{"delta": {"reasoning_content": "thinking..."}, "finish_reason": null, "index": 0}],
+            }),
+            json!({
+                "id": "abc",
+                "choices": [{"delta": {"content": "hello"}, "finish_reason": null, "index": 0}],
+            }),
+            json!({
+                "id": "abc",
+                "choices": [{"delta": {}, "finish_reason": "stop", "index": 0}],
+            }),
+            json!({
+                "id": "abc",
+                "choices": [],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13},
+            }),
+        ];
+        let out = run(&chunks);
+
+        // Required event sequence
+        assert_eq!(count_event(&out, "message_start"), 1);
+        assert_eq!(count_event(&out, "message_stop"), 1);
+        assert_eq!(count_event(&out, "message_delta"), 1);
+
+        // Two blocks: thinking + text
+        assert_eq!(count_event(&out, "content_block_start"), 2);
+        assert_eq!(count_event(&out, "content_block_stop"), 2);
+
+        // Deltas of each kind exist
+        assert!(out.contains("\"type\":\"thinking_delta\""));
+        assert!(out.contains("\"thinking\":\"thinking...\""));
+        assert!(out.contains("\"type\":\"text_delta\""));
+        assert!(out.contains("\"text\":\"hello\""));
+
+        // stop_reason mapping: openai "stop" → anthropic "end_turn"
+        assert!(out.contains("\"stop_reason\":\"end_turn\""));
+
+        // usage propagated
+        assert!(out.contains("\"input_tokens\":10"));
+        assert!(out.contains("\"output_tokens\":3"));
+    }
+
+    #[test]
+    fn anthropic_tool_use_stream() {
+        let chunks = vec![
+            json!({
+                "id": "tx", "choices": [{
+                    "delta": {"role": "assistant",
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{\"q\""}
+                        }]},
+                    "finish_reason": null, "index": 0}],
+            }),
+            json!({
+                "id": "tx", "choices": [{
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "function": {"arguments": ":\"hi\"}"}
+                    }]},
+                    "finish_reason": null, "index": 0}],
+            }),
+            json!({
+                "id": "tx", "choices": [{
+                    "delta": {}, "finish_reason": "tool_calls", "index": 0}],
+            }),
+        ];
+        let out = run(&chunks);
+        assert!(out.contains("\"type\":\"tool_use\""));
+        assert!(out.contains("\"id\":\"call_1\""));
+        assert!(out.contains("\"name\":\"lookup\""));
+        assert!(out.contains("\"type\":\"input_json_delta\""));
+        // openai "tool_calls" → anthropic "tool_use"
+        assert!(out.contains("\"stop_reason\":\"tool_use\""));
+    }
+
+    #[test]
+    fn anthropic_to_openai_request_strips_anthropic_prefix() {
+        let body = json!({
+            "model": "anthropic/mimo-omni",
+            "system": "you are helpful",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 32,
+        });
+        let openai = anthropic_to_openai_chat(&body).expect("ok");
+        assert_eq!(openai["model"].as_str(), Some("mimo-omni"));
+        let msgs = openai["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["role"].as_str(), Some("system"));
+        assert_eq!(msgs[1]["role"].as_str(), Some("user"));
+        assert_eq!(openai["max_tokens"].as_i64(), Some(32));
+    }
+
+    #[test]
+    fn anthropic_tool_blocks_preserved_in_request() {
+        let body = json!({
+            "model": "mimo-omni",
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "tu1", "name": "fn", "input": {"a": 1}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "tu1", "content": "42"}
+                ]}
+            ],
+            "tools": [{"name": "fn", "description": "x", "input_schema": {"type": "object"}}]
+        });
+        let openai = anthropic_to_openai_chat(&body).expect("ok");
+        let msgs = openai["messages"].as_array().unwrap();
+        // tool message comes first, then assistant tool_calls
+        let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert!(roles.contains(&"tool"));
+        assert!(roles.contains(&"assistant"));
+        // tools mapped to OpenAI function-style
+        let tools = openai["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["type"].as_str(), Some("function"));
+        assert_eq!(tools[0]["function"]["name"].as_str(), Some("fn"));
+    }
+}
+

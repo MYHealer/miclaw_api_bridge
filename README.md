@@ -5,38 +5,50 @@
 ## 当前实现
 
 ```
-┌────────────────┐  小米账号 OAuth   ┌─────────────────────────┐
-│ mimo-bridge    │ ────────────────→ │ account.xiaomi.com       │
-│ (Tauri + Vue3) │                  │ /pass/serviceLogin{,Auth2} │
-│                │ ←────────────────  └─────────────────────────┘
-│                │  serviceToken+cUserId
+┌────────────────┐ 1. account.xiaomi.com /pass/serviceLoginAuth2 (sid=miclaw)
+│ mimo-bridge    │ ─────────────────────────────────────────────► passToken + cUserId
+│ (Tauri + Vue3) │
+│                │ 2. /pass/serviceLogin?sid=osbotapi (UA=miNative PC, 7 cookies)
+│                │ ─────────────────────────────────────────────► loc + nonce + ssecurity
 │                │
-│                │  POST /v1/chat/completions     ────────────► api.miclaw.xiaomi.net
-│                │  POST /v1/messages (Anthropic)              /osbot/pc/llm/v1/chat/completions
-│                │  GET  /v1/models                                 (OpenAI Chat + SSE)
+│                │ 3. <loc>&clientSign=base64(sha1("nonce=N&ssecurity")) (no cookies)
+│                │ ─────────────────────────────────────────────► serviceToken
+│                │
+│                │ 4. POST api.miclaw.xiaomi.net/osbot/pc/llm/v1/chat/completions
+│                │       Cookie: serviceToken+cUserId, UA=node
+│                │ ─────────────────────────────────────────────► OpenAI SSE chunks
+│                │
+│ axum :8765     │ 暴露:
+│  /v1/chat/completions   ← OpenAI Chat 透传
+│  /v1/messages           ← Anthropic Messages，SSE 双向翻译
+│  /v1/models             ← 模型列表
 └────────────────┘
 ```
 
-- **小米账号**：复刻自反编译的 `MiPassportLoginActivity`：`sid=xiaomihome`、密码 MD5 大写、`_sign/qs/callback` 防重放、2FA 短信(flag=4)/邮箱(flag=8)。
-- **mimo 调用**：用登录得到的 `serviceToken+cUserId` cookie 直连 `api.miclaw.xiaomi.net`（PC 端口）。**无需设备签名**。
-- **本地服务**：axum 监听 `127.0.0.1:8765`，OpenAI Chat 透传，Anthropic Messages 流式翻译为 OpenAI Chat 再转回 Anthropic SSE 事件。
+### 关键事实（从源码与 HAR 实测对齐得来）
+
+- 第一阶段密码登录 `sid=miclaw`，密码 MD5 大写哈希；2FA 短信 `flag=4` / 邮箱 `flag=8`，发码 / 验证均挂在同一 cookie jar。
+- 第二阶段换 mimo 专用 `serviceToken`：`sid=osbotapi`，UA 必须是 macOS miclaw 的 `miNative PC/...`，cookie 7 件套：`passToken / userId / cUserId / deviceId / uDevId / uLocale / pass_ua`。
+- `deviceId = "pc_" + md5_hex(IOPlatformUUID.toLowerCase())`，与反编译的 `dist-electron/libs/xiaomi/deviceid.js` 完全一致。
+- `uDevId = base64(sha1(userId + deviceId))`。
+- 拿 serviceToken 走两步：Phase 1 GET 带 7 cookies → 拿 `loc + nonce + ssecurity`；Phase 2 GET `<loc>&clientSign=<sig>` **不带 cookie**，从 Set-Cookie 解出 `serviceToken`。`sig = url_encode(base64(sha1("nonce=N&ssecurity")))`。
+- nonce 是大整数，必须从 raw JSON 抽取（serde_json / JSON.parse 会丢精度）。
+- mimo 真实调用只需 `Cookie: serviceToken=...; cUserId=...`，UA `node`，无设备签名。
+- 401 时自动用 passToken 走 osbotapi 双阶段刷新一次。
+- 凭证写 OS keyring（macOS Keychain / Windows DPAPI / Linux SecretService），磁盘上不留明文。
 
 ## 开发与运行
 
 ```bash
-# 一次性装依赖
 pnpm install
-
-# 起桌面端
-pnpm tauri dev
-
-# 仅校验后端
-cd src-tauri && cargo check
+pnpm tauri dev          # 起桌面端
+cd src-tauri && cargo check    # 仅校验后端
+cargo test --lib                # 跑单元测试（Anthropic 翻译器等）
 ```
 
 ### 真账号 OAuth 集成测试
 
-不会进入 CI，只在本地用环境变量手动触发：
+只在本地用环境变量手动触发：
 
 ```bash
 cd src-tauri
@@ -45,14 +57,21 @@ cd src-tauri
 MIMO_BRIDGE_SMOKE_ACCOUNT=user@example.com \
 MIMO_BRIDGE_SMOKE_PASSWORD='secret' \
 cargo test --test smoke_login -- --ignored --nocapture
-# 输出会指引你在邮箱/短信里收到验证码后再次执行：
 
+# 收到短信/邮箱验证码后:
 MIMO_BRIDGE_SMOKE_ACCOUNT=user@example.com \
 MIMO_BRIDGE_SMOKE_PASSWORD='secret' \
-MIMO_BRIDGE_SMOKE_2FA_FLAG=8 \
+MIMO_BRIDGE_SMOKE_2FA_FLAG=4 \
 MIMO_BRIDGE_SMOKE_2FA_TICKET='123456' \
 MIMO_BRIDGE_SMOKE_CHAT=1 \
 cargo test --test smoke_login -- --ignored --nocapture
+```
+
+## 打包
+
+```bash
+pnpm tauri build
+# 产物在 src-tauri/target/release/bundle/dmg/*.dmg 和 .../macos/*.app
 ```
 
 ## 客户端接入
@@ -61,37 +80,44 @@ cargo test --test smoke_login -- --ignored --nocapture
 
 ```
 Base URL: http://127.0.0.1:8765/v1
-API Key:   anything
-Model:     mimo-omni
+API Key:  anything
+Model:    mimo-omni
 ```
 
 ### Anthropic 兼容（Claude Code / 走 ANTHROPIC_BASE_URL 的客户端）
 
 ```
 Base URL: http://127.0.0.1:8765
-API Key:   anything
-Model:     mimo-omni  (或前缀 anthropic/，会自动剥离)
+API Key:  anything
+Model:    mimo-omni    (或前缀 anthropic/ 会自动剥离)
 ```
 
 ### curl 流式探测
 
 ```bash
-curl http://127.0.0.1:8765/v1/chat/completions \
+# OpenAI Chat
+curl -N http://127.0.0.1:8765/v1/chat/completions \
   -H 'content-type: application/json' \
-  -d '{"model":"mimo-omni","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"mimo-omni","stream":true,"messages":[{"role":"user","content":"你好"}]}'
+
+# Anthropic Messages
+curl -N http://127.0.0.1:8765/v1/messages \
+  -H 'content-type: application/json' \
+  -H 'anthropic-version: 2023-06-01' \
+  -d '{"model":"mimo-omni","max_tokens":256,"stream":true,"messages":[{"role":"user","content":"你好"}]}'
 ```
 
 ## 路线图
 
-- [x] M1 Tauri + Vue + Rust 脚手架，命令矩阵
-- [x] M2 OAuth 2FA：smoke 测试在本地用真账号跑通（待你执行）
-- [x] M3 mimo PC 客户端（无需 sdc 设备签名 / Companion APK）
-- [x] M4 axum 本地代理：OpenAI Chat 透传 + Anthropic Messages 流式翻译
-- [ ] M5 Vue 前端真实联调（登录页、状态、日志）
-- [ ] M6 端到端：Cline / Claude Code / Cherry Studio 接入验证
-- [ ] M7 macOS dmg 打包、Windows MSI
+- [x] M1 Tauri + Vue + Rust 脚手架
+- [x] M2 OAuth 2FA（smoke 真账号通过）
+- [x] M3 mimo PC 客户端（osbotapi 双阶段换 token，自动刷新）
+- [x] M4 axum 本地代理：OpenAI Chat 透传 + Anthropic Messages 流式翻译（含单测）
+- [x] M5 Vue 前端：登录、概览、实时日志面板
+- [x] M6 凭证写 keyring，session.json 不留明文
+- [x] M7 macOS dmg 打包
 
 ## 安全提示
 
-- 账号密码不会持久化，只把 `serviceToken/passToken/cUserId/userId/ssecurity/nick` 几项写入应用数据目录的 `session.json`（明文）。后续会迁移到 keyring。
+- 账号密码绝不持久化；登录成功后只把 `passToken / serviceToken / cUserId / userId / ssecurity / nick` 写到 OS keyring。
 - 本项目仅供学习交流，使用者自行承担风险。

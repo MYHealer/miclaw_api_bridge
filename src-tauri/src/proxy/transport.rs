@@ -1,6 +1,5 @@
 use super::ProxyController;
 use crate::error::BridgeError;
-use crate::mimo::MimoClient;
 use axum::{
     body::Body,
     http::{header, HeaderMap, StatusCode},
@@ -44,8 +43,18 @@ pub async fn list_models(_ctrl: Arc<ProxyController>) -> Response {
     .into_response()
 }
 
+/// Emit a structured log entry to the front-end's `proxy-log` event
+/// channel. Safe to call from any handler.
+pub fn emit_log(ctrl: &ProxyController, payload: Value) {
+    ctrl.emitter.emit(payload);
+}
+
 /// Forward a JSON request to mimo, streaming the upstream bytes back.
-pub async fn forward(mimo: Arc<MimoClient>, upstream_path: &str, body: Value) -> Response {
+pub async fn forward(
+    ctrl: Arc<ProxyController>,
+    upstream_path: &str,
+    body: Value,
+) -> Response {
     let stream_requested = body
         .get("stream")
         .and_then(|v| v.as_bool())
@@ -53,22 +62,51 @@ pub async fn forward(mimo: Arc<MimoClient>, upstream_path: &str, body: Value) ->
     let model = body
         .get("model")
         .and_then(|v| v.as_str())
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_string();
+    let started = std::time::Instant::now();
     tracing::debug!(
         target = "proxy",
         "→ mimo {upstream_path} stream={stream_requested} model={model}"
     );
-    match mimo.post_json(upstream_path, body).await {
+    emit_log(
+        &ctrl,
+        json!({
+            "ts": chrono::Utc::now().timestamp_millis(),
+            "kind": "request",
+            "path": upstream_path,
+            "model": model,
+            "stream": stream_requested,
+        }),
+    );
+    match ctrl.mimo.post_json(upstream_path, body).await {
         Ok(upstream) => {
-            tracing::debug!(
-                target = "proxy",
-                "← mimo {upstream_path} status={}",
-                upstream.status()
+            let status = upstream.status();
+            tracing::debug!(target = "proxy", "← mimo {upstream_path} status={status}");
+            emit_log(
+                &ctrl,
+                json!({
+                    "ts": chrono::Utc::now().timestamp_millis(),
+                    "kind": "response",
+                    "path": upstream_path,
+                    "status": status.as_u16(),
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                }),
             );
             proxy_response(upstream).await
         }
         Err(e) => {
             tracing::warn!(target = "proxy", "mimo {upstream_path} error: {e}");
+            emit_log(
+                &ctrl,
+                json!({
+                    "ts": chrono::Utc::now().timestamp_millis(),
+                    "kind": "error",
+                    "path": upstream_path,
+                    "message": e.to_string(),
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                }),
+            );
             map_err(e)
         }
     }

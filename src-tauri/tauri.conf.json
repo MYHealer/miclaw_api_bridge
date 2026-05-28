@@ -28,7 +28,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app", "dmg"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -38,6 +38,9 @@
     ],
     "category": "DeveloperTool",
     "shortDescription": "Local OpenAI/Claude compatible bridge for Xiaomi mimo",
-    "longDescription": "Authenticates with Xiaomi account and exposes mimo LLM through local OpenAI Responses and Anthropic Messages compatible endpoints."
+    "longDescription": "Sign in with a Xiaomi account and expose mimo LLM as a local OpenAI Chat Completions and Anthropic Messages endpoint.",
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
   }
 }

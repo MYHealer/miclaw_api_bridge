@@ -777,19 +777,12 @@ fn read_machine_id() -> Option<String> {
     None
 }
 
-/// Same idea for `uDevId`. HAR shows it as a 28-char base64-ish blob; we
-/// emit a 28-char base64-url-safe string. The exact format isn't validated
-/// server-side beyond shape.
-pub(crate) fn stable_udev_id(_user_id: Option<&str>) -> String {
-    use base64::Engine;
-    use md5::{Digest, Md5};
-    let sn = read_machine_id().unwrap_or_else(|| "anon".to_string());
-    let mut hasher = Md5::new();
-    hasher.update(b"mimo-bridge-uDevId-v1\0");
-    hasher.update(sn.as_bytes());
-    let bytes = hasher.finalize();
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-    let mut s = raw.into_bytes();
-    s.resize(28, b'A');
-    String::from_utf8(s).unwrap_or_else(|_| "AAAAAAAAAAAAAAAAAAAAAAAAAAAA".into())
+/// Same idea for `uDevId`. We follow miclaw's algorithm extracted from
+/// `service-token-manager.js`: `base64(sha1(userId + deviceId))`. Use
+/// [`stable_udev_id_for`] when both pieces are known; this convenience
+/// wrapper falls back when only the userId is at hand.
+#[allow(dead_code)]
+pub(crate) fn stable_udev_id(user_id: Option<&str>) -> String {
+    let device_id = stable_device_id(user_id);
+    stable_udev_id_for(user_id.unwrap_or(""), &device_id)
 }

@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 pub async fn chat(State(ctrl): State<Arc<ProxyController>>, Json(body): Json<Value>) -> Response {
-    forward(ctrl.mimo.clone(), crate::mimo::PATH_CHAT, body).await
+    forward(ctrl.clone(), crate::mimo::PATH_CHAT, body).await
 }
 
 pub async fn models(State(ctrl): State<Arc<ProxyController>>) -> Response {

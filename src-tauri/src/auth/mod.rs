@@ -141,10 +141,17 @@ pub struct LoginTransport {
 }
 
 const SESSION_BLOB: &str = "session";
+const KEYRING_SERVICE: &str = "com.neoruaa.mimo-bridge";
+const KEYRING_USER: &str = "session";
 
 impl AuthState {
     pub fn load(storage: &Storage) -> Result<Self> {
-        let session: Session = storage.load_blob(SESSION_BLOB)?.unwrap_or_default();
+        // Prefer the OS keyring; fall back to the on-disk blob from earlier
+        // versions so people who upgrade keep their session.
+        let session = match keyring_load() {
+            Ok(Some(s)) => s,
+            _ => storage.load_blob(SESSION_BLOB)?.unwrap_or_default(),
+        };
         Ok(Self {
             session,
             flow: LoginFlowContext::default(),
@@ -153,11 +160,18 @@ impl AuthState {
     }
 
     pub fn save(&self, storage: &Storage) -> Result<()> {
-        storage.save_blob(SESSION_BLOB, &self.session)?;
+        if let Err(e) = keyring_save(&self.session) {
+            tracing::warn!(target = "auth", "keyring write failed, falling back to disk: {e}");
+            storage.save_blob(SESSION_BLOB, &self.session)?;
+        } else {
+            // Successfully written to keyring — remove any stale plaintext.
+            let _ = storage.delete_blob(SESSION_BLOB);
+        }
         Ok(())
     }
 
     pub fn clear(storage: &Storage) -> Result<()> {
+        let _ = keyring_clear();
         storage.delete_blob(SESSION_BLOB)?;
         Ok(())
     }
@@ -178,6 +192,39 @@ impl AuthState {
     /// so the next attempt starts from a fresh cookie jar.
     pub fn reset_transport(&self) {
         *self.transport.lock() = None;
+    }
+}
+
+fn keyring_entry() -> Result<keyring::Entry> {
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+        .map_err(|e| BridgeError::Storage(format!("keyring entry: {e}")))
+}
+
+fn keyring_load() -> Result<Option<Session>> {
+    let entry = keyring_entry()?;
+    match entry.get_password() {
+        Ok(s) if !s.is_empty() => match serde_json::from_str(&s) {
+            Ok(v) => Ok(Some(v)),
+            Err(e) => Err(BridgeError::Storage(format!("keyring decode: {e}"))),
+        },
+        Ok(_) => Ok(None),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(BridgeError::Storage(format!("keyring read: {e}"))),
+    }
+}
+
+fn keyring_save(session: &Session) -> Result<()> {
+    let json = serde_json::to_string(session)?;
+    keyring_entry()?
+        .set_password(&json)
+        .map_err(|e| BridgeError::Storage(format!("keyring write: {e}")))?;
+    Ok(())
+}
+
+fn keyring_clear() -> Result<()> {
+    match keyring_entry()?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(BridgeError::Storage(format!("keyring delete: {e}"))),
     }
 }
 
