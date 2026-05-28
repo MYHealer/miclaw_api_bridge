@@ -110,6 +110,20 @@ impl MimoClient {
         let session = self.snapshot()?;
         let (client, _) = build_http_client(&session)?;
         let headers = self.build_headers(&session)?;
+        // Diagnostic: cookie shape (lengths only, never values).
+        if let Some(c) = headers.get("cookie").and_then(|v| v.to_str().ok()) {
+            let parts: Vec<String> = c
+                .split(';')
+                .map(str::trim)
+                .filter_map(|kv| {
+                    let mut it = kv.splitn(2, '=');
+                    let k = it.next()?;
+                    let v = it.next().unwrap_or("");
+                    Some(format!("{k}(len={})", v.len()))
+                })
+                .collect();
+            tracing::debug!(target = "mimo", "cookie shape: [{}]", parts.join(", "));
+        }
         let resp = client
             .request(Method::POST, format!("{MIMO_HOST}{path}"))
             .headers(headers)

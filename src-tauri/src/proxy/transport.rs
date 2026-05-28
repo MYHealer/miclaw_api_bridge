@@ -46,9 +46,31 @@ pub async fn list_models(_ctrl: Arc<ProxyController>) -> Response {
 
 /// Forward a JSON request to mimo, streaming the upstream bytes back.
 pub async fn forward(mimo: Arc<MimoClient>, upstream_path: &str, body: Value) -> Response {
+    let stream_requested = body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let model = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    tracing::debug!(
+        target = "proxy",
+        "→ mimo {upstream_path} stream={stream_requested} model={model}"
+    );
     match mimo.post_json(upstream_path, body).await {
-        Ok(upstream) => proxy_response(upstream).await,
-        Err(e) => map_err(e),
+        Ok(upstream) => {
+            tracing::debug!(
+                target = "proxy",
+                "← mimo {upstream_path} status={}",
+                upstream.status()
+            );
+            proxy_response(upstream).await
+        }
+        Err(e) => {
+            tracing::warn!(target = "proxy", "mimo {upstream_path} error: {e}");
+            map_err(e)
+        }
     }
 }
 

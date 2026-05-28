@@ -1,61 +1,97 @@
 # mimo-bridge
 
-把小米账号登录获得的 mimo 大模型，桥接成本地的 OpenAI / Anthropic 兼容接口，供 Cline、Claude Code、Cherry Studio 等客户端使用。
+把小米账号登录得到的 mimo 大模型，桥接成本地的 OpenAI / Anthropic 兼容接口，供 Cline、Claude Code、Cherry Studio 等客户端使用。
 
-## 总体架构
+## 当前实现
 
 ```
-┌─────────────┐  小米账号 OAuth   ┌───────────────────────┐  HTTP   ┌─────────────────┐
-│ mimo-bridge │ ───────────────→ │ account.xiaomi.com    │         │ mimo-companion  │
-│ (Tauri 桌面) │                  │ /pass/serviceLoginAuth2│         │ (Android APK)   │
-│             │  cookie三件套     │                        │         │                 │
-│             │ ←───────────────  └───────────────────────┘         │ /sign /fid      │
-│             │                                                       │ /health         │
-│             │                                                       └────────┬────────┘
-│             │  POST /v1/chat/completions ──────────────────────────────────────┐
-│             │  POST /v1/responses                                              │
-│             │  POST /v1/messages (Anthropic) ─────► OpenAI Responses 转换     │
-│             │  POST /v1/embeddings                                              │
-└─────────────┘                                                                  │
-                                                                                  ▼
-                                                              api.miclaw.xiaomi.net
-                                                              /osbot/api/llm/v1/...
+┌────────────────┐  小米账号 OAuth   ┌─────────────────────────┐
+│ mimo-bridge    │ ────────────────→ │ account.xiaomi.com       │
+│ (Tauri + Vue3) │                  │ /pass/serviceLogin{,Auth2} │
+│                │ ←────────────────  └─────────────────────────┘
+│                │  serviceToken+cUserId
+│                │
+│                │  POST /v1/chat/completions     ────────────► api.miclaw.xiaomi.net
+│                │  POST /v1/messages (Anthropic)              /osbot/pc/llm/v1/chat/completions
+│                │  GET  /v1/models                                 (OpenAI Chat + SSE)
+└────────────────┘
 ```
 
-- **小米账号**：完整复刻 miclaw 的 `MiPassportLoginActivity`（`sid=xiaomihome`、密码 MD5 大写、`_sign/qs/callback` 防重放、2FA 短信/邮箱）。
-- **mimo 调用**：通过 cookie `cUserId+userId+serviceToken` 鉴权，附带 `x-device-fid/signature/ts` 设备签名头。
-- **设备签名**：来自小米手机 MIUI 系统服务 `com.xiaomi.account.action.SECURITY_DEVICE_SIGN`（TEE 私钥），无法纯软复刻。本项目通过 `mimo-companion` APK 在用户手机上代理签名。
-- **本地服务**：axum 监听 `127.0.0.1:8765`，暴露 OpenAI Chat / Responses / Embeddings 与 Anthropic Messages 端点，OpenAI 接口透传，Anthropic 接口做 Responses ↔ Messages 双向 SSE 翻译。
+- **小米账号**：复刻自反编译的 `MiPassportLoginActivity`：`sid=xiaomihome`、密码 MD5 大写、`_sign/qs/callback` 防重放、2FA 短信(flag=4)/邮箱(flag=8)。
+- **mimo 调用**：用登录得到的 `serviceToken+cUserId` cookie 直连 `api.miclaw.xiaomi.net`（PC 端口）。**无需设备签名**。
+- **本地服务**：axum 监听 `127.0.0.1:8765`，OpenAI Chat 透传，Anthropic Messages 流式翻译为 OpenAI Chat 再转回 Anthropic SSE 事件。
 
-## 开发
+## 开发与运行
 
 ```bash
+# 一次性装依赖
 pnpm install
+
+# 起桌面端
 pnpm tauri dev
+
+# 仅校验后端
+cd src-tauri && cargo check
+```
+
+### 真账号 OAuth 集成测试
+
+不会进入 CI，只在本地用环境变量手动触发：
+
+```bash
+cd src-tauri
+
+# 先发 2FA 验证码
+MIMO_BRIDGE_SMOKE_ACCOUNT=user@example.com \
+MIMO_BRIDGE_SMOKE_PASSWORD='secret' \
+cargo test --test smoke_login -- --ignored --nocapture
+# 输出会指引你在邮箱/短信里收到验证码后再次执行：
+
+MIMO_BRIDGE_SMOKE_ACCOUNT=user@example.com \
+MIMO_BRIDGE_SMOKE_PASSWORD='secret' \
+MIMO_BRIDGE_SMOKE_2FA_FLAG=8 \
+MIMO_BRIDGE_SMOKE_2FA_TICKET='123456' \
+MIMO_BRIDGE_SMOKE_CHAT=1 \
+cargo test --test smoke_login -- --ignored --nocapture
+```
+
+## 客户端接入
+
+### OpenAI 兼容（Cline / Cherry Studio / OpenAI SDK）
+
+```
+Base URL: http://127.0.0.1:8765/v1
+API Key:   anything
+Model:     mimo-omni
+```
+
+### Anthropic 兼容（Claude Code / 走 ANTHROPIC_BASE_URL 的客户端）
+
+```
+Base URL: http://127.0.0.1:8765
+API Key:   anything
+Model:     mimo-omni  (或前缀 anthropic/，会自动剥离)
+```
+
+### curl 流式探测
+
+```bash
+curl http://127.0.0.1:8765/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"mimo-omni","stream":true,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
 ## 路线图
 
 - [x] M1 Tauri + Vue + Rust 脚手架，命令矩阵
-- [ ] M2 OAuth 2FA 在 CLI 测试用例中跑通
-- [ ] M3 mimo-companion APK + Rust 客户端
-- [ ] M4 mimo 流式调用：CLI 模式真实命中 `/chat/completions` 与 `/responses`
-- [ ] M5 Anthropic Messages 流式还原（已具备代码骨架，待联调）
-- [ ] M6 端到端：Cline / Claude Code / Cherry Studio 接入
+- [x] M2 OAuth 2FA：smoke 测试在本地用真账号跑通（待你执行）
+- [x] M3 mimo PC 客户端（无需 sdc 设备签名 / Companion APK）
+- [x] M4 axum 本地代理：OpenAI Chat 透传 + Anthropic Messages 流式翻译
+- [ ] M5 Vue 前端真实联调（登录页、状态、日志）
+- [ ] M6 端到端：Cline / Claude Code / Cherry Studio 接入验证
 - [ ] M7 macOS dmg 打包、Windows MSI
 
-## 兼容性
+## 安全提示
 
-| 路径                   | 协议                       | 说明                              |
-| ---------------------- | -------------------------- | --------------------------------- |
-| `GET  /v1/models`      | OpenAI                     | 列出可用模型                      |
-| `POST /v1/chat/completions` | OpenAI Chat（含 SSE） | 透传给 mimo                       |
-| `POST /v1/responses`   | OpenAI Responses（含 SSE） | 透传给 mimo                       |
-| `POST /v1/embeddings`  | OpenAI Embeddings          | 透传给 mimo（默认 siliconflow）   |
-| `POST /v1/messages`    | Anthropic Messages（含 SSE）| 内部转 Responses，事件流双向翻译  |
-
-## 安全
-
-- 账号密码不会持久化，登录成功后只保留 cookie 三件套（默认写入 OS keychain）。
-- 设备签名通过 LAN 或 ADB reverse 与 companion 通信，建议优先使用 ADB reverse。
+- 账号密码不会持久化，只把 `serviceToken/passToken/cUserId/userId/ssecurity/nick` 几项写入应用数据目录的 `session.json`（明文）。后续会迁移到 keyring。
 - 本项目仅供学习交流，使用者自行承担风险。

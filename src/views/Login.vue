@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import { api } from "../api";
+import { onMounted, ref } from "vue";
+import { api, AuthSnapshot } from "../api";
 
+const auth = ref<AuthSnapshot | null>(null);
 const account = ref("");
 const password = ref("");
 const captcha = ref("");
@@ -14,6 +15,35 @@ const busy = ref(false);
 const message = ref("");
 const error = ref("");
 
+async function refreshAuth() {
+  try {
+    auth.value = await api.authStatus();
+    if (auth.value?.authenticated) {
+      flow.value = "done";
+      message.value = `已登录：${auth.value.nick ?? auth.value.user_id ?? ""}`;
+    }
+  } catch (e: any) {
+    error.value = String(e);
+  }
+}
+
+async function logout() {
+  busy.value = true;
+  try {
+    await api.logout();
+    auth.value = await api.authStatus();
+    flow.value = "idle";
+    message.value = "";
+    error.value = "";
+    options.value = [];
+    ticket.value = "";
+  } catch (e: any) {
+    error.value = String(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
 async function doLogin() {
   busy.value = true;
   error.value = "";
@@ -23,6 +53,7 @@ async function doLogin() {
     if (res.outcome === "authenticated") {
       flow.value = "done";
       message.value = `登录成功：${res.nick ?? account.value}`;
+      auth.value = await api.authStatus();
     } else if (res.outcome === "two_factor_required") {
       flow.value = "two_factor";
       options.value = res.options;
@@ -46,6 +77,8 @@ async function doLogin() {
 
 async function sendTicket() {
   busy.value = true;
+  error.value = "";
+  message.value = "";
   try {
     await api.sendTicket(flag.value);
     message.value = flag.value === 4 ? "已发送短信验证码。" : "已发送邮箱验证码。";
@@ -58,23 +91,40 @@ async function sendTicket() {
 
 async function verify() {
   busy.value = true;
+  error.value = "";
   try {
     await api.verifyTicket(flag.value, ticket.value);
     message.value = "验证成功。";
     flow.value = "done";
+    auth.value = await api.authStatus();
   } catch (e: any) {
     error.value = String(e);
   } finally {
     busy.value = false;
   }
 }
+
+onMounted(refreshAuth);
 </script>
 
 <template>
   <h1>小米账号登录</h1>
   <p class="muted">使用账号密码登录小米账号，获得 mimo 调用所需的 serviceToken。账号密码不会上传。</p>
 
-  <section class="card">
+  <section class="card" v-if="auth?.authenticated">
+    <div class="row">
+      <span class="tag ok">
+        已登录 {{ auth.nick ?? auth.user_id ?? "" }}
+      </span>
+      <div class="grow"></div>
+      <button class="danger" :disabled="busy" @click="logout">退出登录</button>
+    </div>
+    <p class="muted" v-if="auth.refreshed_at">
+      最后刷新：{{ new Date(auth.refreshed_at).toLocaleString() }}
+    </p>
+  </section>
+
+  <section class="card" v-if="!auth?.authenticated">
     <div class="row">
       <div class="grow">
         <label>账号 / 邮箱 / 手机号</label>
@@ -101,7 +151,7 @@ async function verify() {
     </div>
   </section>
 
-  <section class="card" v-if="flow === 'two_factor'">
+  <section class="card" v-if="!auth?.authenticated && flow === 'two_factor'">
     <h2>二步验证</h2>
     <div class="row">
       <div class="grow">
