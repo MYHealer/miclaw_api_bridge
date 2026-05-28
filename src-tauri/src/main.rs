@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    mimo_bridge_lib::run();
+    miclaw_api_bridge_lib::run();
 }

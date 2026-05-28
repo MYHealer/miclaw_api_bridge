@@ -21,13 +21,13 @@
 //! cargo test --test smoke_login -- --ignored --nocapture
 //! ```
 
-use mimo_bridge_lib::auth::{
+use miclaw_api_bridge_lib::auth::{
     build_http_client, login as do_login,
     login::{LoginOutcome, LoginRequest},
     refresh_session, send_ticket, verify_ticket, AuthState, Session,
 };
-use mimo_bridge_lib::error::Result;
-use mimo_bridge_lib::storage::Storage;
+use miclaw_api_bridge_lib::error::Result;
+use miclaw_api_bridge_lib::storage::Storage;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ fn must_env(key: &str) -> Option<String> {
 
 fn make_storage() -> Arc<Storage> {
     let base = std::env::temp_dir().join(format!(
-        "mimo-bridge-smoke-{}",
+        "miclaw-api-bridge-smoke-{}",
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
     ));
     let cfg = base.join("config");
@@ -81,8 +81,8 @@ async fn smoke_login_chat() -> Result<()> {
         }
         LoginOutcome::TwoFactorRequired { options } => {
             eprintln!("→ 2FA required, options={:?}", options);
-            let pinned_flag = must_env("MIMO_BRIDGE_SMOKE_2FA_FLAG")
-                .and_then(|s| s.parse::<i32>().ok());
+            let pinned_flag =
+                must_env("MIMO_BRIDGE_SMOKE_2FA_FLAG").and_then(|s| s.parse::<i32>().ok());
             let flag = pinned_flag
                 .or_else(|| options.iter().copied().find(|f| *f == 8))
                 .or_else(|| options.first().copied())

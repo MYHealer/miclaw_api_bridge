@@ -563,7 +563,12 @@ impl SseTranslator {
                     let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
                     self.ensure_open(OpenBlock::Tool(idx), &mut out);
                     // Block index for this tool.
-                    let block_index = self.state.tool_blocks.get(&idx).map(|b| b.block_index).unwrap_or(0);
+                    let block_index = self
+                        .state
+                        .tool_blocks
+                        .get(&idx)
+                        .map(|b| b.block_index)
+                        .unwrap_or(0);
                     let mut emit_start = false;
                     if let Some(b) = self.state.tool_blocks.get_mut(&idx) {
                         if !b.started {
@@ -743,10 +748,7 @@ impl SseTranslator {
             }
         });
         out.push(format_sse("message_delta", &evt));
-        out.push(format_sse(
-            "message_stop",
-            &json!({"type": "message_stop"}),
-        ));
+        out.push(format_sse("message_stop", &json!({"type": "message_stop"})));
         self.state.finished = true;
     }
 }
@@ -778,10 +780,7 @@ impl Stream for SseTranslator {
                     continue;
                 }
                 Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Some(Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e,
-                    ))));
+                    return Poll::Ready(Some(Err(std::io::Error::other(e))));
                 }
                 Poll::Ready(None) => {
                     if !this.state.finished {
@@ -950,4 +949,3 @@ mod tests {
         assert_eq!(tools[0]["function"]["name"].as_str(), Some("fn"));
     }
 }
-

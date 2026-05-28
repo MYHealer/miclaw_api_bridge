@@ -5,7 +5,7 @@ import { RouterView, RouterLink } from "vue-router";
 <template>
   <div class="app-shell">
     <aside class="sidebar">
-      <div class="brand">mimo-bridge</div>
+      <div class="brand">miclaw_api_bridge</div>
       <nav>
         <RouterLink to="/dashboard">概览</RouterLink>
         <RouterLink to="/login">小米账号</RouterLink>

@@ -141,7 +141,7 @@ pub struct LoginTransport {
 }
 
 const SESSION_BLOB: &str = "session";
-const KEYRING_SERVICE: &str = "com.neoruaa.mimo-bridge";
+const KEYRING_SERVICE: &str = "com.neoruaa.miclaw-api-bridge";
 const KEYRING_USER: &str = "session";
 
 impl AuthState {
@@ -161,7 +161,10 @@ impl AuthState {
 
     pub fn save(&self, storage: &Storage) -> Result<()> {
         if let Err(e) = keyring_save(&self.session) {
-            tracing::warn!(target = "auth", "keyring write failed, falling back to disk: {e}");
+            tracing::warn!(
+                target = "auth",
+                "keyring write failed, falling back to disk: {e}"
+            );
             storage.save_blob(SESSION_BLOB, &self.session)?;
         } else {
             // Successfully written to keyring — remove any stale plaintext.
@@ -260,15 +263,9 @@ pub fn build_refresh_client(session: &Session) -> Result<(reqwest::Client, Arc<J
             &format!("passToken={token}; Domain=.xiaomi.com; Path=/"),
             &url,
         );
-        jar.add_cookie_str(
-            &format!("userId={uid}; Domain=.xiaomi.com; Path=/"),
-            &url,
-        );
+        jar.add_cookie_str(&format!("userId={uid}; Domain=.xiaomi.com; Path=/"), &url);
         if let Some(c) = &session.c_user_id {
-            jar.add_cookie_str(
-                &format!("cUserId={c}; Domain=.xiaomi.com; Path=/"),
-                &url,
-            );
+            jar.add_cookie_str(&format!("cUserId={c}; Domain=.xiaomi.com; Path=/"), &url);
         }
     }
     let mut headers = HeaderMap::new();

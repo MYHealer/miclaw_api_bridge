@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "mimo-bridge",
+  "productName": "miclaw_api_bridge",
   "version": "0.1.0",
-  "identifier": "com.neoruaa.mimo-bridge",
+  "identifier": "com.neoruaa.miclaw-api-bridge",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "mimo-bridge",
+        "title": "miclaw_api_bridge",
         "width": 980,
         "height": 720,
         "minWidth": 760,
@@ -38,7 +38,7 @@
     ],
     "category": "DeveloperTool",
     "shortDescription": "Local OpenAI/Claude compatible bridge for Xiaomi mimo",
-    "longDescription": "Sign in with a Xiaomi account and expose mimo LLM as a local OpenAI Chat Completions and Anthropic Messages endpoint.",
+    "longDescription": "Sign in with a miclaw-permissioned Xiaomi account and expose mimo LLM as a local OpenAI Chat Completions and Anthropic Messages endpoint.",
     "macOS": {
       "minimumSystemVersion": "11.0"
     }

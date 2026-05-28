@@ -1,6 +1,4 @@
-use super::{
-    strip_prefix, AuthState, LoginFlowContext, Session, SERVICE_LOGIN_AUTH2_URL,
-};
+use super::{strip_prefix, AuthState, LoginFlowContext, Session, SERVICE_LOGIN_AUTH2_URL};
 use crate::auth::two_factor::extract_query_param;
 use crate::error::{BridgeError, Result};
 use crate::storage::Storage;
@@ -22,14 +20,23 @@ pub struct LoginRequest {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum LoginOutcome {
     /// Login succeeded; session has been written.
-    Authenticated { nick: Option<String> },
+    Authenticated {
+        nick: Option<String>,
+    },
     /// 2FA required, the front-end should pick a method (4=phone, 8=email)
     /// from `options` then ask for a verification ticket.
-    TwoFactorRequired { options: Vec<i32> },
+    TwoFactorRequired {
+        options: Vec<i32>,
+    },
     /// Server requires a captcha. The URL points to an image returned by
     /// `account.xiaomi.com/pass/getCode`.
-    CaptchaRequired { captcha_url: String },
-    Failed { code: i64, description: String },
+    CaptchaRequired {
+        captcha_url: String,
+    },
+    Failed {
+        code: i64,
+        description: String,
+    },
 }
 
 /// Run `serviceLoginAuth2` and either:
@@ -159,7 +166,9 @@ pub async fn login(
                 })
                 .unwrap_or_default();
             if options.is_empty() {
-                return Err(BridgeError::Login("identity/list returned no options".into()));
+                return Err(BridgeError::Login(
+                    "identity/list returned no options".into(),
+                ));
             }
 
             let context = extract_query_param(url, "context").map(|s| s.to_string());
@@ -306,10 +315,7 @@ pub(crate) async fn swap_to_osbotapi_token(
 
     // Build the 7-cookie header that the macOS client sends.
     let device_id = stable_device_id(session.user_id.as_deref());
-    let u_dev_id = stable_udev_id_for(
-        session.user_id.as_deref().unwrap_or(""),
-        &device_id,
-    );
+    let u_dev_id = stable_udev_id_for(session.user_id.as_deref().unwrap_or(""), &device_id);
     let mut cookie = format!("passToken={pass_token}");
     if let Some(uid) = &session.user_id {
         cookie.push_str(&format!("; userId={uid}"));
@@ -479,7 +485,11 @@ pub(crate) async fn swap_to_osbotapi_token(
             "osbotapi phase2 returned no serviceToken (status={phase2_status})"
         ))
     })?;
-    tracing::debug!(target = "auth", "osbotapi serviceToken acquired, len={}", token.len());
+    tracing::debug!(
+        target = "auth",
+        "osbotapi serviceToken acquired, len={}",
+        token.len()
+    );
     session.service_token = Some(token);
     session.refreshed_at = Some(chrono::Utc::now().timestamp_millis());
     Ok(session)
@@ -763,7 +773,10 @@ fn read_machine_id() -> Option<String> {
     #[cfg(target_os = "windows")]
     {
         use std::process::Command;
-        let out = Command::new("wmic").args(["bios", "get", "serialnumber"]).output().ok()?;
+        let out = Command::new("wmic")
+            .args(["bios", "get", "serialnumber"])
+            .output()
+            .ok()?;
         let text = String::from_utf8_lossy(&out.stdout);
         for line in text.lines() {
             let s = line.trim();

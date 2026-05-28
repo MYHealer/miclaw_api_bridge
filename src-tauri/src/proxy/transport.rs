@@ -50,11 +50,7 @@ pub fn emit_log(ctrl: &ProxyController, payload: Value) {
 }
 
 /// Forward a JSON request to mimo, streaming the upstream bytes back.
-pub async fn forward(
-    ctrl: Arc<ProxyController>,
-    upstream_path: &str,
-    body: Value,
-) -> Response {
+pub async fn forward(ctrl: Arc<ProxyController>, upstream_path: &str, body: Value) -> Response {
     let stream_requested = body
         .get("stream")
         .and_then(|v| v.as_bool())

@@ -1,12 +1,12 @@
 [package]
-name = "mimo-bridge"
+name = "miclaw_api_bridge"
 version = "0.1.0"
 description = "Bridge Xiaomi mimo LLM into local OpenAI / Claude compatible APIs"
 edition = "2021"
 rust-version = "1.77"
 
 [lib]
-name = "mimo_bridge_lib"
+name = "miclaw_api_bridge_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

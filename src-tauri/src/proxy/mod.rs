@@ -66,6 +66,7 @@ impl ProxyController {
             .route("/", get(openai::root))
             .route("/v1/models", get(openai::models))
             .route("/v1/chat/completions", post(openai::chat))
+            .route("/v1/responses", post(openai::responses))
             .route("/v1/messages", post(anthropic::messages))
             .with_state(self.clone())
             .layer(CorsLayer::permissive());

@@ -7,7 +7,7 @@ use tauri::AppHandle;
 
 const QUALIFIER: &str = "com";
 const ORG: &str = "neoruaa";
-const APP: &str = "mimo-bridge";
+const APP: &str = "miclaw_api_bridge";
 
 /// Application-wide on-disk storage. Stores plaintext settings (proxy port)
 /// plus opaque blobs persisted by sub-modules. Sensitive credentials should
@@ -41,7 +41,11 @@ impl Storage {
     pub fn new(app: &AppHandle) -> Result<Arc<Self>> {
         let dirs = ProjectDirs::from(QUALIFIER, ORG, APP)
             .ok_or_else(|| BridgeError::Storage("cannot resolve project dirs".into()))?;
-        Self::open(dirs.config_dir().to_path_buf(), dirs.data_dir().to_path_buf(), Some(app.clone()))
+        Self::open(
+            dirs.config_dir().to_path_buf(),
+            dirs.data_dir().to_path_buf(),
+            Some(app.clone()),
+        )
     }
 
     /// Construct a `Storage` rooted at the given directories without going

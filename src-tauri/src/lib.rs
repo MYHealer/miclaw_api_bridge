@@ -1,4 +1,4 @@
-//! mimo-bridge: bridge Xiaomi mimo into local OpenAI/Claude compatible APIs.
+//! miclaw_api_bridge: bridge Xiaomi mimo into local OpenAI/Claude compatible APIs.
 
 pub mod auth;
 pub mod commands;
@@ -16,8 +16,9 @@ use tauri::Manager;
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,mimo_bridge_lib=debug")),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("info,miclaw_api_bridge_lib=debug")
+            }),
         )
         .init();
 

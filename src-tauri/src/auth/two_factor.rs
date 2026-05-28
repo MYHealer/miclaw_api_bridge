@@ -9,9 +9,15 @@ use std::sync::Arc;
 /// 2FA flag → relative path on `account.xiaomi.com`.
 fn paths_for(flag: i32) -> (&'static str, &'static str) {
     match flag {
-        4 => ("/identity/auth/sendPhoneTicket", "/identity/auth/verifyPhone"),
+        4 => (
+            "/identity/auth/sendPhoneTicket",
+            "/identity/auth/verifyPhone",
+        ),
         // 8 = email; the rest fall back to email which is the most common.
-        _ => ("/identity/auth/sendEmailTicket", "/identity/auth/verifyEmail"),
+        _ => (
+            "/identity/auth/sendEmailTicket",
+            "/identity/auth/verifyEmail",
+        ),
     }
 }
 
@@ -40,7 +46,10 @@ pub async fn send_ticket(state: &Arc<RwLock<AuthState>>, flag: i32) -> Result<bo
         .await?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
-    tracing::debug!(target = "auth", "sendTicket flag={flag} status={status} body={text:?}");
+    tracing::debug!(
+        target = "auth",
+        "sendTicket flag={flag} status={status} body={text:?}"
+    );
     if !status.is_success() {
         return Err(BridgeError::Login(format!("sendTicket http {status}")));
     }
@@ -79,11 +88,10 @@ pub async fn verify_ticket(
 ) -> Result<()> {
     let (transport, account, password_hash) = {
         let guard = state.read();
-        let acc = guard
-            .flow
-            .pending_account
-            .clone()
-            .ok_or_else(|| BridgeError::Login("no in-flight login (call login first)".into()))?;
+        let acc =
+            guard.flow.pending_account.clone().ok_or_else(|| {
+                BridgeError::Login("no in-flight login (call login first)".into())
+            })?;
         let hash = guard
             .flow
             .pending_password_hash
@@ -124,7 +132,9 @@ pub async fn verify_ticket(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        return Err(BridgeError::Login(format!("verify code={code} desc={desc}")));
+        return Err(BridgeError::Login(format!(
+            "verify code={code} desc={desc}"
+        )));
     }
     // Verify response carries a `location` URL pointing at the trusted
     // landing page. We fetch it once so any cookies it sets land in the
@@ -164,7 +174,10 @@ pub async fn verify_ticket(
             .as_object()
             .map(|o| o.keys().cloned().collect::<Vec<_>>())
     );
-    let auth2_code = auth2_json.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    let auth2_code = auth2_json
+        .get("code")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(-1);
     if auth2_code != 0 {
         let desc = auth2_json
             .get("description")
@@ -189,8 +202,7 @@ pub async fn verify_ticket(
     // it entirely. swap_to_osbotapi_token re-issues serviceLogin with sid=
     // osbotapi using the passToken we already have, and that's what mimo
     // actually accepts.
-    let session =
-        super::login::swap_to_osbotapi_token(&transport.client, session_seed).await?;
+    let session = super::login::swap_to_osbotapi_token(&transport.client, session_seed).await?;
     tracing::debug!(
         target = "auth",
         "final session: hasUserId={} hasCUserId={} hasPassToken={} hasServiceToken={} authenticated={}",
@@ -214,9 +226,7 @@ pub async fn verify_ticket(
 pub fn extract_query_param<'a>(url: &'a str, key: &str) -> Option<&'a str> {
     let q = url.split_once('?').map(|x| x.1)?;
     for kv in q.split('&') {
-        let mut it = kv.splitn(2, '=');
-        let k = it.next()?;
-        let v = it.next()?;
+        let (k, v) = kv.split_once('=')?;
         if k == key {
             return Some(v);
         }

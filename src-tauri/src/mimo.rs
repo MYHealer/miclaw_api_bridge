@@ -18,6 +18,11 @@ pub const MIMO_HOST: &str = "https://api.miclaw.xiaomi.net";
 /// `userId`/`cUserId` cookies, only `serviceToken`.
 pub const PATH_CHAT: &str = "/osbot/pc/llm/v1/chat/completions";
 
+/// OpenAI Responses-shaped endpoint. Android captures expose the same suffix
+/// under `/osbot/api`; on PC we optimistically use the parallel `/osbot/pc`
+/// route and let upstream status surface to the caller.
+pub const PATH_RESPONSES: &str = "/osbot/pc/llm/v1/responses";
+
 /// MCP host service exposed by miclaw PC. Out of scope for the bridge today;
 /// kept here so we don't accidentally collide with it.
 #[allow(dead_code)]
@@ -34,13 +39,70 @@ pub struct ModelInfo {
     pub family: &'static str,
 }
 
+/// Models confirmed to work via the PC `osbotapi` channel. Discovered by
+/// probing each candidate name against `/osbot/pc/llm/v1/chat/completions`
+/// and inspecting the upstream `model` field in the response. Names that
+/// 4xx (e.g. plain `mimo-v2-omni` without the `xiaomi/` prefix, or
+/// `xiaomi/mimo-omni` with it) are deliberately omitted.
+///
+/// Notes:
+/// * The bridge passes `model` through verbatim — the upstream router
+///   handles canonicalization (e.g. `mimo-pro-1m` → `mimo-pro` with a 1M
+///   context window).
+/// * `xiaomi/qwen35_9B` is hosted on vLLM and uses a slightly different
+///   response shape (extra `refusal` / `annotations` / `token_ids` fields)
+///   but is OpenAI-compatible at the level any sane client cares about.
 pub fn known_models() -> Vec<ModelInfo> {
-    vec![ModelInfo {
-        id: "mimo-omni".into(),
-        object: "model",
-        owned_by: "xiaomi",
-        family: "chat",
-    }]
+    vec![
+        ModelInfo {
+            id: "mimo-omni".into(),
+            object: "model",
+            owned_by: "xiaomi",
+            family: "chat (multimodal, 256K)",
+        },
+        ModelInfo {
+            id: "mimo-pro".into(),
+            object: "model",
+            owned_by: "xiaomi",
+            family: "chat (reasoning)",
+        },
+        ModelInfo {
+            id: "mimo-pro-1m".into(),
+            object: "model",
+            owned_by: "xiaomi",
+            family: "chat (reasoning, 1M context)",
+        },
+        ModelInfo {
+            id: "xiaomi/mimo-pro".into(),
+            object: "model",
+            owned_by: "xiaomi",
+            family: "chat (reasoning, alias)",
+        },
+        ModelInfo {
+            id: "xiaomi/mimo-claw-0301".into(),
+            object: "model",
+            owned_by: "xiaomi",
+            family: "chat (claw 0301 snapshot)",
+        },
+        ModelInfo {
+            id: "xiaomi/mimo-v2-omni".into(),
+            object: "model",
+            owned_by: "xiaomi",
+            family: "chat (v2 multimodal)",
+        },
+        ModelInfo {
+            id: "xiaomi/mimo-v2-pro".into(),
+            object: "model",
+            owned_by: "xiaomi",
+            family: "chat (v2 reasoning)",
+        },
+        ModelInfo {
+            id: "xiaomi/qwen35_9B".into(),
+            object: "model",
+            owned_by: "siliconflow",
+            family: "chat (Qwen 3.5 9B via vLLM)",
+        },
+    ]
 }
 
 pub struct MimoClient {
@@ -115,7 +177,10 @@ impl MimoClient {
         if resp.status() != reqwest::StatusCode::UNAUTHORIZED {
             return Ok(resp);
         }
-        tracing::warn!(target = "mimo", "{path} got 401, refreshing serviceToken via osbotapi swap");
+        tracing::warn!(
+            target = "mimo",
+            "{path} got 401, refreshing serviceToken via osbotapi swap"
+        );
         let _ = resp.bytes().await; // drain
         match self.refresh_service_token().await {
             Ok(()) => {
