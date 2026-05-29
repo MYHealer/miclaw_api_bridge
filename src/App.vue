@@ -7,6 +7,10 @@ type Theme = "light" | "dark";
 
 const route = useRoute();
 const theme = ref<Theme>("light");
+const patternLetters = ["M", "I", "M", "O"];
+const patternRows = Array.from({ length: 8 }, (_, row) =>
+  Array.from({ length: 18 }, (_, col) => patternLetters[(col + (row % 2)) % patternLetters.length]),
+);
 
 const pageTitle = computed(() => {
   if (route.path.includes("login")) return "小米账号";
@@ -70,11 +74,13 @@ watchEffect(() => {
 
     <section class="page-hero" aria-label="当前页面">
       <div class="pattern" aria-hidden="true">
-        <span v-for="i in 72" :key="i">M I M O</span>
+        <span v-for="(row, rowIndex) in patternRows" :key="rowIndex" class="pattern-row">
+          <b v-for="(letter, colIndex) in row" :key="`${rowIndex}-${colIndex}`">{{ letter }}</b>
+        </span>
       </div>
       <p class="section-number">01</p>
       <h1>{{ pageTitle }}</h1>
-      <p class="hero-copy">把 Xiaomi MiMo 接成本地 OpenAI / Anthropic 兼容端点。</p>
+      <p class="hero-copy">将 Xiaomi miclaw 模型转接成本地 OpenAI / Anthropic 兼容端点。</p>
     </section>
 
     <main class="content">

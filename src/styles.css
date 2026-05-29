@@ -13,10 +13,11 @@
   --warn: #a16b10;
   --bad: #b13b3b;
   --shadow: 0 24px 70px rgba(32, 28, 24, 0.08);
+  --pattern-ink: rgba(5, 5, 5, 0.035);
   color: var(--ink);
   background: var(--bg);
   font-family:
-    MiSans, "MiSans VF", "PingFang SC", "Noto Sans SC", -apple-system, BlinkMacSystemFont,
+    "MiSans VF", MiSans, "PingFang SC", "Noto Sans SC", -apple-system, BlinkMacSystemFont,
     "Segoe UI", sans-serif;
   font-size: 14px;
   text-rendering: geometricPrecision;
@@ -37,6 +38,7 @@
   --warn: #e1ad54;
   --bad: #ff7676;
   --shadow: 0 24px 70px rgba(0, 0, 0, 0.34);
+  --pattern-ink: rgba(246, 242, 238, 0.055);
 }
 
 * {
@@ -175,17 +177,31 @@ code {
 
 .page-hero .pattern {
   position: absolute;
-  inset: -20px 0;
-  display: grid;
-  grid-template-columns: repeat(12, 1fr);
-  gap: 28px 42px;
-  padding: 28px 54px;
-  color: color-mix(in srgb, var(--ink) 6%, transparent);
-  font-size: clamp(28px, 4.8vw, 58px);
+  inset: -40px -36px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 34px;
+  padding: 24px 0;
+  color: var(--pattern-ink);
+  font-size: 58px;
   font-weight: 900;
-  letter-spacing: 0.34em;
+  line-height: 1;
   pointer-events: none;
   user-select: none;
+}
+
+.pattern-row {
+  display: grid;
+  grid-template-columns: repeat(18, minmax(44px, 1fr));
+  align-items: center;
+  width: 100%;
+}
+
+.pattern-row b {
+  display: block;
+  font: inherit;
+  text-align: center;
 }
 
 .page-hero h1 {
@@ -221,9 +237,9 @@ code {
 .content {
   overflow: auto;
   min-height: 0;
-  background:
+  /* background:
     linear-gradient(90deg, transparent 0 119px, var(--line-soft) 120px 121px, transparent 122px),
-    var(--bg);
+    var(--bg); */
 }
 
 .status-strip {
@@ -516,7 +532,7 @@ select:focus {
 
 .login-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
+  grid-template-columns: auto auto;
   border-bottom: 1px solid var(--line);
 }
 
@@ -671,9 +687,14 @@ select:focus {
   }
 
   .page-hero .pattern {
-    grid-template-columns: repeat(6, 1fr);
-    padding: 18px 22px;
-    gap: 20px;
+    inset: -28px -48px;
+    gap: 26px;
+    padding: 18px 0;
+    font-size: 42px;
+  }
+
+  .pattern-row {
+    grid-template-columns: repeat(18, minmax(34px, 1fr));
   }
 
   .content {
