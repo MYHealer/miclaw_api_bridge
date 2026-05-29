@@ -137,7 +137,11 @@ You can build Linux AppImage locally from macOS with Docker:
 pnpm build:linux-appimage
 ```
 
-The AppImage is copied to `target-local/linux-appimage/`.
+The script forces Docker to build for `linux/amd64`, which is the Steam Deck / SteamOS architecture. The AppImage is copied to `target-local/linux-appimage/`. If you intentionally need another Linux architecture, override it:
+
+```bash
+MICLAW_DOCKER_PLATFORM=linux/arm64 pnpm build:linux-appimage
+```
 
 For Windows, `.msi` still requires a Windows host because WiX only runs on Windows. From macOS/Linux you can build a Windows NSIS `setup.exe` instead:
 
