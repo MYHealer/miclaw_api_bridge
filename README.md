@@ -4,9 +4,8 @@
 
 **Run Xiaomi mimo locally as an OpenAI / Anthropic-compatible endpoint.**
 
-Sign in with a miclaw-permissioned Xiaomi account, hit `http://127.0.0.1:8765` from any OpenAI / Claude client.
+Sign in with a miclaw-permissioned Xiaomi account, then hit `http://127.0.0.1:8765` from any browser, OpenAI client, or Claude-compatible client.
 
-[![Built with Tauri](https://img.shields.io/badge/Tauri-2-blue?logo=tauri)](https://tauri.app/)
 [![Rust](https://img.shields.io/badge/Rust-1.77+-orange?logo=rust)](https://www.rust-lang.org/)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883?logo=vue.js)](https://vuejs.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)]()
@@ -25,7 +24,7 @@ miclaw_api_bridge logs into your Xiaomi account the same way the official **Xiao
 - `POST /v1/messages` — Anthropic Messages, with full SSE event translation (drop-in for Claude Code and any client honoring `ANTHROPIC_BASE_URL`)
 - `GET /v1/models` — the eight verified model ids
 
-> ⚠️ **Account requirement**: your Xiaomi account must already be approved for miclaw access. If `pnpm tauri dev` shows "需要 miclaw 内测权限" or the proxy returns 401 right after login, the account isn't allowlisted — apply through the official miclaw channel first.
+> ⚠️ **Account requirement**: your Xiaomi account must already be approved for miclaw access. If the WebUI shows "需要 miclaw 内测权限" or the proxy returns 401 right after login, the account isn't allowlisted — apply through the official miclaw channel first.
 
 Eight models are exposed, all routed through the official Xiaomi PC channel:
 
@@ -46,22 +45,32 @@ Eight models are exposed, all routed through the official Xiaomi PC channel:
 - 🔄 **Auto token refresh** — `serviceToken` rotated transparently on 401
 - 🔑 **Keychain-backed storage** — credentials live in macOS Keychain / Windows DPAPI / Linux Secret Service, never on disk in plaintext
 - 🔌 **Two protocols, one bridge** — speaks both OpenAI Chat Completions and Anthropic Messages
-- 📡 **Live request log** — built-in panel streams every proxy hit in real time
-- 🖥 **Native desktop app** — Tauri + Vue 3, ~6 MB packaged
+- 🌐 **Browser WebUI** — the former desktop UI is served at `http://127.0.0.1:8765`
+- 📡 **Live request log** — WebUI streams every proxy hit in real time
+- 🖥 **Optional desktop tray** — no embedded webview window; tray menu only opens WebUI or exits
+- 🧩 **Headless deployment** — server binary runs on machines without a graphical session
 
 ## Quick start
 
 ### From a release
 
-1. Grab the installer for your platform from the [Releases](../../releases) page:
-   - macOS: `.dmg` universal build for Apple Silicon and Intel
-   - Windows: `.msi`
-   - Linux: `.AppImage`
-2. Install or launch **miclaw_api_bridge**
-3. Sign in with your miclaw-permissioned Xiaomi account
-4. Open the **Dashboard** tab and click **Start** — proxy is now listening on `127.0.0.1:8765`
+1. Grab the binary archive for your platform from the [Releases](../../releases) page.
+2. Start the headless server:
 
-> First launch on macOS: right-click → Open to bypass Gatekeeper (the app isn't notarized).
+   ```bash
+   ./miclaw_api_bridge server
+   ```
+
+3. Open `http://127.0.0.1:8765` in a browser and sign in with your miclaw-permissioned Xiaomi account.
+4. OpenAI / Responses / Anthropic endpoints are available immediately on the same port.
+
+Desktop users can launch `miclaw_api_bridge_desktop` instead. It starts the same local service, opens the WebUI in your default browser, and adds a tray icon with **打开webui** / **退出**.
+
+For remote/headless servers, keep the default localhost binding and use an SSH tunnel:
+
+```bash
+ssh -L 8765:127.0.0.1:8765 user@server
+```
 
 ### Hooking up a client
 
@@ -108,15 +117,21 @@ Prerequisites: Rust 1.77+, Node.js 20+, pnpm 9+.
 ```bash
 git clone <this-repo> miclaw_api_bridge && cd miclaw_api_bridge
 pnpm install
-pnpm tauri dev          # run in dev mode
-pnpm tauri build        # produce the native bundle for the current OS
+pnpm build              # build the browser WebUI into dist/
+cd src-tauri
+cargo build --release --bin miclaw_api_bridge
+cargo build --release --features desktop --bin miclaw_api_bridge_desktop
 ```
 
-The signed bundle ends up in `src-tauri/target/release/bundle/`.
+The binaries end up in `src-tauri/target/release/`. You can also build both for the current platform with:
+
+```bash
+pnpm build:binaries
+```
 
 ### Release automation
 
-Pushing a version tag builds a draft GitHub Release with platform installers:
+Pushing a version tag builds a draft GitHub Release with platform binary archives:
 
 ```bash
 git tag v0.1.0
@@ -125,33 +140,13 @@ git push origin v0.1.0
 
 The release workflow produces:
 
-- macOS universal `.dmg`
-- Windows x64 `.msi`
-- Linux x64 `.AppImage`
+- macOS universal zip: headless server + desktop tray binaries
+- Windows x64 zip: headless server + desktop tray `.exe` binaries
+- Windows ARM64 zip: headless server + desktop tray `.exe` binaries
+- Linux x64 tar.gz: headless server + desktop tray binaries
+- Linux ARM64 tar.gz: headless server + desktop tray binaries
 
-### Local cross builds
-
-You can build Linux AppImage locally from macOS with Docker:
-
-```bash
-pnpm build:linux-appimage
-```
-
-The script forces Docker to build for `linux/amd64`. The AppImage is copied to `target-local/linux-appimage/`. If you intentionally need another Linux architecture, override it:
-
-```bash
-MICLAW_DOCKER_PLATFORM=linux/arm64 pnpm build:linux-appimage
-```
-
-For Windows, `.msi` still requires a Windows host because WiX only runs on Windows. From macOS/Linux you can build a Windows NSIS `setup.exe` instead:
-
-```bash
-cargo install --locked cargo-xwin
-brew install nsis llvm
-pnpm build:windows-nsis
-```
-
-The NSIS installer is written to `src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/`.
+Linux and Windows ARM64 releases are built on native GitHub-hosted ARM runners, not emulated cross-builds.
 
 ### Tests
 
@@ -171,10 +166,10 @@ cargo test --test smoke_login -- --ignored --nocapture
 
 ```
 ┌─────────────────┐
-│ Vue 3 frontend  │   Tauri IPC    ┌──────────────────────────┐
-│ Login / Status  │◄──────────────►│ Rust backend (Tauri host)│
-│ Logs panel      │                └────────────┬─────────────┘
-└─────────────────┘                             │
+│ Browser WebUI   │   /api/*      ┌──────────────────────────┐
+│ Login / Status  │◄─────────────►│ Rust headless server     │
+│ Logs panel      │   SSE logs     │ optional desktop tray    │
+└─────────────────┘                └────────────┬─────────────┘
                                                 │ axum on 127.0.0.1:8765
                                                 ▼
                        ┌────────────────────────────────────────────┐
@@ -223,6 +218,7 @@ A 401 from any mimo call triggers a transparent re-run of steps 2–3.
 | Setting | Where | Default |
 |---|---|---|
 | Listen port | Dashboard ▸ "Listen port" | `8765` |
+| Listen host | CLI `server --host` | `127.0.0.1` |
 | OAuth `sid` | env `MIMO_BRIDGE_SID` | `miclaw` |
 | Session storage | OS keyring (auto) | n/a |
 
@@ -245,17 +241,19 @@ Not yet. Tracking under [#multi-account](../../issues).
 
 ## Roadmap
 
-- [x] Tauri + Vue + Rust scaffolding
+- [x] Vue WebUI + Rust server scaffolding
 - [x] Xiaomi OAuth with 2FA
 - [x] mimo PC client with auto token refresh
 - [x] OpenAI Chat Completions passthrough
 - [x] Anthropic Messages bridge with SSE translation
 - [x] Live log panel
 - [x] Keychain-backed credential storage
-- [x] macOS dmg packaging
+- [x] Headless CLI/server binary
+- [x] Browser WebUI
+- [x] Desktop tray launcher
 - [x] Universal macOS binary (Intel + Apple Silicon)
 - [ ] Code signing & notarization
-- [x] Windows / Linux release pipeline
+- [x] Windows / Linux x64 + ARM64 release pipeline
 - [ ] Multi-account support
 - [ ] Optional rate-limit / quota dashboard
 

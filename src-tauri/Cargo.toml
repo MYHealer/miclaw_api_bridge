@@ -7,17 +7,23 @@ rust-version = "1.77"
 
 [lib]
 name = "miclaw_api_bridge_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
+
+[[bin]]
+name = "miclaw_api_bridge"
+path = "src/main.rs"
+
+[[bin]]
+name = "miclaw_api_bridge_desktop"
+path = "src/bin/miclaw_api_bridge_desktop.rs"
+required-features = ["desktop"]
 
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }
 
 [dependencies]
-# tauri runtime
-tauri = { version = "2.1", features = [] }
-tauri-plugin-shell = "2.0"
-tauri-plugin-dialog = "2.0"
-tauri-plugin-clipboard-manager = "2.0"
+# desktop tray runtime (optional; headless CLI does not link Tauri/WebKit)
+tauri = { version = "2.1", optional = true, features = ["tray-icon", "image-png"] }
 
 # async runtime
 tokio = { version = "1.41", features = ["full"] }
@@ -64,6 +70,10 @@ parking_lot = "0.12"
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
 bytes = "1.8"
+clap = { version = "4.5", features = ["derive"] }
+rust-embed = "8.5"
+mime_guess = "2.0"
+open = "5.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # keyring's Linux Secret Service backend needs an explicit runtime + crypto selection.
@@ -71,4 +81,5 @@ secret-service = { version = "4.0", features = ["rt-tokio-crypto-rust"] }
 
 [features]
 default = []
-custom-protocol = ["tauri/custom-protocol"]
+desktop = ["dep:tauri"]
+custom-protocol = ["tauri?/custom-protocol"]

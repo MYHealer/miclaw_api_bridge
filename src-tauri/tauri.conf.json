@@ -10,25 +10,14 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "miclaw_api_bridge",
-        "width": 980,
-        "height": 720,
-        "minWidth": 760,
-        "minHeight": 560,
-        "resizable": true,
-        "fullscreen": false
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }
   },
   "bundle": {
-    "active": true,
-    "targets": ["dmg", "msi", "appimage"],
+    "active": false,
+    "targets": [],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

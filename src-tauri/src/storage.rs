@@ -3,7 +3,6 @@ use directories::ProjectDirs;
 use parking_lot::RwLock;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{fs, path::PathBuf, sync::Arc};
-use tauri::AppHandle;
 
 const QUALIFIER: &str = "com";
 const ORG: &str = "neoruaa";
@@ -16,7 +15,6 @@ pub struct Storage {
     config_dir: PathBuf,
     data_dir: PathBuf,
     settings: RwLock<Settings>,
-    _app: Option<AppHandle>,
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
@@ -38,23 +36,22 @@ impl Default for Settings {
 }
 
 impl Storage {
-    pub fn new(app: &AppHandle) -> Result<Arc<Self>> {
+    pub fn new() -> Result<Arc<Self>> {
         let dirs = ProjectDirs::from(QUALIFIER, ORG, APP)
             .ok_or_else(|| BridgeError::Storage("cannot resolve project dirs".into()))?;
         Self::open(
             dirs.config_dir().to_path_buf(),
             dirs.data_dir().to_path_buf(),
-            Some(app.clone()),
         )
     }
 
     /// Construct a `Storage` rooted at the given directories without going
-    /// through Tauri's `AppHandle`. Used by integration tests.
+    /// through platform directory discovery. Used by integration tests.
     pub fn for_paths(config_dir: PathBuf, data_dir: PathBuf) -> Result<Arc<Self>> {
-        Self::open(config_dir, data_dir, None)
+        Self::open(config_dir, data_dir)
     }
 
-    fn open(config_dir: PathBuf, data_dir: PathBuf, app: Option<AppHandle>) -> Result<Arc<Self>> {
+    fn open(config_dir: PathBuf, data_dir: PathBuf) -> Result<Arc<Self>> {
         fs::create_dir_all(&config_dir)?;
         fs::create_dir_all(&data_dir)?;
 
@@ -70,7 +67,6 @@ impl Storage {
             config_dir,
             data_dir,
             settings: RwLock::new(settings),
-            _app: app,
         });
         me.persist_settings()?;
         Ok(me)

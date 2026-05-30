@@ -34,9 +34,9 @@ pub const MODEL_DEFAULT: &str = "mimo-omni";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
-    pub object: &'static str,
-    pub owned_by: &'static str,
-    pub family: &'static str,
+    pub object: String,
+    pub owned_by: String,
+    pub family: String,
 }
 
 /// Models confirmed to work via the PC `osbotapi` channel. Discovered by
@@ -56,51 +56,51 @@ pub fn known_models() -> Vec<ModelInfo> {
     vec![
         ModelInfo {
             id: "mimo-omni".into(),
-            object: "model",
-            owned_by: "xiaomi",
-            family: "chat (multimodal, 256K)",
+            object: "model".into(),
+            owned_by: "xiaomi".into(),
+            family: "chat (multimodal, 256K)".into(),
         },
         ModelInfo {
             id: "mimo-pro".into(),
-            object: "model",
-            owned_by: "xiaomi",
-            family: "chat (reasoning)",
+            object: "model".into(),
+            owned_by: "xiaomi".into(),
+            family: "chat (reasoning)".into(),
         },
         ModelInfo {
             id: "mimo-pro-1m".into(),
-            object: "model",
-            owned_by: "xiaomi",
-            family: "chat (reasoning, 1M context)",
+            object: "model".into(),
+            owned_by: "xiaomi".into(),
+            family: "chat (reasoning, 1M context)".into(),
         },
         ModelInfo {
             id: "xiaomi/mimo-pro".into(),
-            object: "model",
-            owned_by: "xiaomi",
-            family: "chat (reasoning, alias)",
+            object: "model".into(),
+            owned_by: "xiaomi".into(),
+            family: "chat (reasoning, alias)".into(),
         },
         ModelInfo {
             id: "xiaomi/mimo-claw-0301".into(),
-            object: "model",
-            owned_by: "xiaomi",
-            family: "chat (claw 0301 snapshot)",
+            object: "model".into(),
+            owned_by: "xiaomi".into(),
+            family: "chat (claw 0301 snapshot)".into(),
         },
         ModelInfo {
             id: "xiaomi/mimo-v2-omni".into(),
-            object: "model",
-            owned_by: "xiaomi",
-            family: "chat (v2 multimodal)",
+            object: "model".into(),
+            owned_by: "xiaomi".into(),
+            family: "chat (v2 multimodal)".into(),
         },
         ModelInfo {
             id: "xiaomi/mimo-v2-pro".into(),
-            object: "model",
-            owned_by: "xiaomi",
-            family: "chat (v2 reasoning)",
+            object: "model".into(),
+            owned_by: "xiaomi".into(),
+            family: "chat (v2 reasoning)".into(),
         },
         ModelInfo {
             id: "xiaomi/qwen35_9B".into(),
-            object: "model",
-            owned_by: "siliconflow",
-            family: "chat (Qwen 3.5 9B via vLLM)",
+            object: "model".into(),
+            owned_by: "siliconflow".into(),
+            family: "chat (Qwen 3.5 9B via vLLM)".into(),
         },
     ]
 }
@@ -268,7 +268,7 @@ impl MimoClient {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthSnapshot {
     pub authenticated: bool,
     pub nick: Option<String>,

@@ -8,7 +8,7 @@ use reqwest::Client;
 use serde_json::Value;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct LoginRequest {
     pub account: String,
     pub password: String,
@@ -16,7 +16,7 @@ pub struct LoginRequest {
     pub captcha: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum LoginOutcome {
     /// Login succeeded; session has been written.

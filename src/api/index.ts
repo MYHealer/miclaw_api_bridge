@@ -1,5 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
-
 export interface AuthSnapshot {
   authenticated: boolean;
   nick: string | null;
@@ -17,6 +15,8 @@ export interface ProxySnapshot {
   running: boolean;
   addr: string | null;
   port: number;
+  active_port: number | null;
+  restart_required: boolean;
 }
 
 export interface ModelInfo {
@@ -26,70 +26,40 @@ export interface ModelInfo {
   family: string;
 }
 
-const previewModels: ModelInfo[] = [
-  { id: "mimo-omni", object: "model", owned_by: "xiaomi", family: "chat (multimodal, 256K)" },
-  { id: "mimo-pro", object: "model", owned_by: "xiaomi", family: "chat (reasoning)" },
-  { id: "mimo-pro-1m", object: "model", owned_by: "xiaomi", family: "chat (reasoning, 1M context)" },
-  { id: "xiaomi/mimo-v2-pro", object: "model", owned_by: "xiaomi", family: "chat (v2 reasoning)" },
-];
-
-function inTauri() {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const resp = await fetch(path, {
+    ...init,
+    headers: {
+      "content-type": "application/json",
+      ...(init?.headers ?? {}),
+    },
+  });
+  const text = await resp.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!resp.ok) {
+    const message = data?.error?.message ?? `${resp.status} ${resp.statusText}`;
+    throw new Error(message);
+  }
+  return data as T;
 }
 
-async function tauriOrPreview<T>(command: string, args: Record<string, unknown>, preview: T) {
-  if (!inTauri()) return preview;
-  return invoke<T>(command, args);
+function post<T>(path: string, body?: unknown) {
+  return request<T>(path, {
+    method: "POST",
+    body: JSON.stringify(body ?? {}),
+  });
 }
 
 export const api = {
-  authStatus: () =>
-    tauriOrPreview<AuthSnapshot>("auth_status", {}, {
-      authenticated: false,
-      nick: null,
-      user_id: null,
-      refreshed_at: null,
-    }),
+  authStatus: () => request<AuthSnapshot>("/api/auth/status"),
   login: (account: string, password: string, captcha?: string) =>
-    tauriOrPreview<LoginOutcome>(
-      "login",
-      { req: { account, password, captcha } },
-      { outcome: "two_factor_required", options: [8, 4] },
-    ),
-  sendTicket: (flag: number) => tauriOrPreview<boolean>("send_two_factor_ticket", { flag }, true),
+    post<LoginOutcome>("/api/auth/login", { account, password, captcha }),
+  sendTicket: (flag: number) => post<boolean>("/api/auth/two-factor/send", { flag }),
   verifyTicket: (flag: number, ticket: string) =>
-    tauriOrPreview<void>("verify_two_factor", { flag, ticket }, undefined),
-  refreshSession: () =>
-    tauriOrPreview<AuthSnapshot>("refresh_session", {}, {
-      authenticated: true,
-      nick: "preview",
-      user_id: "preview",
-      refreshed_at: Date.now(),
-    }),
-  logout: () => tauriOrPreview<void>("logout", {}, undefined),
-  proxyStatus: () =>
-    tauriOrPreview<ProxySnapshot>("proxy_status", {}, {
-      running: true,
-      addr: "127.0.0.1:8765",
-      port: 8765,
-    }),
-  startProxy: () =>
-    tauriOrPreview<ProxySnapshot>("start_proxy", {}, {
-      running: true,
-      addr: "127.0.0.1:8765",
-      port: 8765,
-    }),
-  stopProxy: () =>
-    tauriOrPreview<ProxySnapshot>("stop_proxy", {}, {
-      running: false,
-      addr: null,
-      port: 8765,
-    }),
-  setProxyPort: (port: number) =>
-    tauriOrPreview<ProxySnapshot>("set_proxy_port", { port }, {
-      running: true,
-      addr: `127.0.0.1:${port}`,
-      port,
-    }),
-  listModels: () => tauriOrPreview<ModelInfo[]>("list_models", {}, previewModels),
+    post<void>("/api/auth/two-factor/verify", { flag, ticket }),
+  refreshSession: () => post<AuthSnapshot>("/api/auth/refresh"),
+  logout: () => post<void>("/api/auth/logout"),
+  proxyStatus: () => request<ProxySnapshot>("/api/proxy/status"),
+  setProxyPort: (port: number) => post<ProxySnapshot>("/api/settings/port", { port }),
+  listModels: () => request<ModelInfo[]>("/api/models"),
 };

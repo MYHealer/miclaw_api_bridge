@@ -5,6 +5,7 @@ use reqwest::cookie::Jar;
 use reqwest::header::{HeaderMap, HeaderValue, COOKIE, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use url::Url;
 
 pub mod login;
@@ -148,7 +149,7 @@ impl AuthState {
     pub fn load(storage: &Storage) -> Result<Self> {
         // Prefer the OS keyring; fall back to the on-disk blob from earlier
         // versions so people who upgrade keep their session.
-        let session = match keyring_load() {
+        let session = match keyring_load_with_timeout(Duration::from_secs(3)) {
             Ok(Some(s)) => s,
             _ => storage.load_blob(SESSION_BLOB)?.unwrap_or_default(),
         };
@@ -213,6 +214,24 @@ fn keyring_load() -> Result<Option<Session>> {
         Ok(_) => Ok(None),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(BridgeError::Storage(format!("keyring read: {e}"))),
+    }
+}
+
+fn keyring_load_with_timeout(timeout: Duration) -> Result<Option<Session>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(keyring_load());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            tracing::warn!(
+                target = "auth",
+                "keyring read timed out; continuing without keyring session"
+            );
+            Ok(None)
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(None),
     }
 }
 

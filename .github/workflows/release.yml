@@ -11,42 +11,45 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
-            label: macOS universal dmg
-            args: "--target universal-apple-darwin --bundles dmg"
-            rustTargets: "aarch64-apple-darwin,x86_64-apple-darwin"
-          - platform: windows-2022
-            label: Windows x64 msi
-            args: "--bundles msi"
-            rustTargets: ""
-          - platform: ubuntu-22.04
-            label: Linux x64 AppImage
-            args: "--bundles appimage"
-            rustTargets: ""
+          - os: macos-latest
+            label: macos-universal
+            archive: miclaw_api_bridge_${{ github.ref_name }}_macos_universal.zip
+          - os: windows-2022
+            label: windows-x64
+            archive: miclaw_api_bridge_${{ github.ref_name }}_windows_x64.zip
+          - os: windows-11-arm
+            label: windows-arm64
+            archive: miclaw_api_bridge_${{ github.ref_name }}_windows_arm64.zip
+          - os: ubuntu-22.04
+            label: linux-x64
+            archive: miclaw_api_bridge_${{ github.ref_name }}_linux_x64.tar.gz
+          - os: ubuntu-24.04-arm
+            label: linux-arm64
+            archive: miclaw_api_bridge_${{ github.ref_name }}_linux_arm64.tar.gz
 
-    runs-on: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.label }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2
+          sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libwebkit2gtk-4.1-dev librsvg2-dev
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -56,9 +59,14 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
 
       - name: Install Rust stable
+        if: runner.os != 'macOS'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust stable with macOS targets
+        if: runner.os == 'macOS'
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.rustTargets }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -68,16 +76,71 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build and upload Tauri bundles
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build WebUI
+        run: pnpm build
+
+      - name: Build macOS universal binaries
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd src-tauri
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --target "$target" --bin miclaw_api_bridge
+            cargo build --release --target "$target" --features desktop --bin miclaw_api_bridge_desktop
+          done
+          mkdir -p ../release
+          lipo -create \
+            target/aarch64-apple-darwin/release/miclaw_api_bridge \
+            target/x86_64-apple-darwin/release/miclaw_api_bridge \
+            -output ../release/miclaw_api_bridge
+          lipo -create \
+            target/aarch64-apple-darwin/release/miclaw_api_bridge_desktop \
+            target/x86_64-apple-darwin/release/miclaw_api_bridge_desktop \
+            -output ../release/miclaw_api_bridge_desktop
+          chmod +x ../release/miclaw_api_bridge ../release/miclaw_api_bridge_desktop
+
+      - name: Build Unix binaries
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd src-tauri
+          cargo build --release --bin miclaw_api_bridge
+          cargo build --release --features desktop --bin miclaw_api_bridge_desktop
+          mkdir -p ../release
+          cp target/release/miclaw_api_bridge ../release/
+          cp target/release/miclaw_api_bridge_desktop ../release/
+
+      - name: Build Windows binaries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cd src-tauri
+          cargo build --release --bin miclaw_api_bridge
+          cargo build --release --features desktop --bin miclaw_api_bridge_desktop
+          New-Item -ItemType Directory -Force ../release | Out-Null
+          Copy-Item target/release/miclaw_api_bridge.exe ../release/
+          Copy-Item target/release/miclaw_api_bridge_desktop.exe ../release/
+
+      - name: Archive zip
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          cd release
+          7z a "../${{ matrix.archive }}" .
+
+      - name: Archive tar.gz
+        if: runner.os == 'Linux'
+        shell: bash
+        run: tar -czf "${{ matrix.archive }}" -C release .
+
+      - name: Upload draft release asset
+        uses: softprops/action-gh-release@v2
         with:
-          tauriScript: pnpm tauri
-          tagName: ${{ github.ref_name }}
-          releaseName: "miclaw_api_bridge ${{ github.ref_name }}"
-          releaseBody: "Draft release generated by GitHub Actions. Assets include macOS dmg, Windows MSI, and Linux AppImage builds."
-          releaseDraft: true
+          tag_name: ${{ github.ref_name }}
+          name: "miclaw_api_bridge ${{ github.ref_name }}"
+          body: "Draft release generated by GitHub Actions. Assets include headless CLI/server and desktop tray binaries."
+          draft: true
           prerelease: false
-          releaseAssetNamePattern: "[name]_[version]_[platform]_[arch][ext]"
-          args: ${{ matrix.args }}
+          files: ${{ matrix.archive }}

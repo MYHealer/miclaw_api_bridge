@@ -10,10 +10,14 @@ const portInput = ref<number>(8765);
 const busy = ref(false);
 const err = ref("");
 
-const proxyBase = computed(() => `http://127.0.0.1:${proxy.value?.port ?? 8765}`);
+const proxyBase = computed(() => {
+  const port = proxy.value?.active_port ?? proxy.value?.port ?? 8765;
+  return `${window.location.protocol}//${window.location.hostname}:${port}`;
+});
 const health = computed(() => {
   if (!auth.value?.authenticated) return { label: "账号未登录", tone: "bad" };
-  if (!proxy.value?.running) return { label: "代理已停止", tone: "warn" };
+  if (!proxy.value?.running) return { label: "服务未运行", tone: "warn" };
+  if (proxy.value.restart_required) return { label: "需重启生效", tone: "warn" };
   return { label: "Ready", tone: "ok" };
 });
 
@@ -26,17 +30,6 @@ async function refreshAll() {
     portInput.value = proxy.value.port;
   } catch (e: any) {
     err.value = String(e);
-  }
-}
-
-async function toggleProxy() {
-  busy.value = true;
-  try {
-    proxy.value = proxy.value?.running ? await api.stopProxy() : await api.startProxy();
-  } catch (e: any) {
-    err.value = String(e);
-  } finally {
-    busy.value = false;
   }
 }
 
@@ -84,7 +77,7 @@ onMounted(refreshAll);
     </div>
     <div>
       <span class="label">Port</span>
-      <strong>{{ proxy?.port ?? 8765 }}</strong>
+      <strong>{{ proxy?.active_port ?? proxy?.port ?? 8765 }}</strong>
     </div>
     <div>
       <span class="label">Models</span>
@@ -102,9 +95,7 @@ onMounted(refreshAll);
     </div>
 
     <div class="proxy-actions">
-      <button class="primary-action" :disabled="busy" @click="toggleProxy">
-        {{ proxy?.running ? "停止代理" : "启动代理" }}
-      </button>
+      <button class="primary-action" disabled>服务运行中</button>
       <div class="port-control">
         <label for="proxy-port">
           <span>监听端口</span>
@@ -113,6 +104,9 @@ onMounted(refreshAll);
         <button class="line-action" :disabled="busy" @click="applyPort">应用</button>
       </div>
     </div>
+    <p v-if="proxy?.restart_required" class="notice warn">
+      新端口 {{ proxy.port }} 已保存，重启服务后生效。当前仍在 {{ proxy.active_port }} 端口运行。
+    </p>
 
     <div class="endpoint-grid">
       <div>

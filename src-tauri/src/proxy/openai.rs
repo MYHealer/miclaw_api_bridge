@@ -35,19 +35,6 @@ pub async fn models(State(ctrl): State<Arc<ProxyController>>) -> Response {
     list_models(ctrl).await
 }
 
-pub async fn root(State(_): State<Arc<ProxyController>>) -> Response {
-    Json(json!({
-        "service": "miclaw_api_bridge",
-        "endpoints": [
-            "/v1/models",
-            "/v1/chat/completions",
-            "/v1/responses",
-            "/v1/messages",
-        ]
-    }))
-    .into_response()
-}
-
 async fn responses_passthrough_or_compat(ctrl: Arc<ProxyController>, body: Value) -> Response {
     match RESPONSES_MODE.load(Ordering::Relaxed) {
         RESPONSES_MODE_PASSTHROUGH => {

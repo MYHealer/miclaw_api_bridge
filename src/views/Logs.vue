@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from "vue";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 interface LogRow {
   ts: number;
@@ -15,36 +14,22 @@ interface LogRow {
 
 const rows = ref<LogRow[]>([]);
 const max = 500;
-let unlisten: UnlistenFn | null = null;
+let events: EventSource | null = null;
+
+function push(row: LogRow) {
+  rows.value.unshift(row);
+  if (rows.value.length > max) rows.value.length = max;
+}
 
 onMounted(async () => {
-  if (!("__TAURI_INTERNALS__" in window)) {
-    rows.value = [
-      {
-        ts: Date.now(),
-        kind: "request",
-        path: "/osbot/pc/llm/v1/chat/completions",
-        model: "mimo-pro",
-        stream: true,
-      },
-      {
-        ts: Date.now() - 42,
-        kind: "response",
-        path: "/osbot/pc/llm/v1/responses",
-        status: 200,
-        elapsed_ms: 1180,
-      },
-    ];
-    return;
-  }
-  unlisten = await listen<LogRow>("proxy-log", (e) => {
-    rows.value.unshift(e.payload);
-    if (rows.value.length > max) rows.value.length = max;
-  });
+  const resp = await fetch("/api/logs");
+  if (resp.ok) rows.value = await resp.json();
+  events = new EventSource("/api/logs/stream");
+  events.onmessage = (event) => push(JSON.parse(event.data) as LogRow);
 });
 
 onBeforeUnmount(() => {
-  if (unlisten) unlisten();
+  events?.close();
 });
 
 function fmtTime(ts: number) {

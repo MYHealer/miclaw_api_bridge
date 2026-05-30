@@ -7,21 +7,16 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "tauri",
-    "build:linux-appimage": "bash scripts/build-linux-appimage.sh",
-    "build:windows-nsis": "bash scripts/build-windows-nsis.sh"
+    "build:server": "pnpm build && cd src-tauri && cargo build --release --bin miclaw_api_bridge",
+    "build:desktop": "pnpm build && cd src-tauri && cargo build --release --features desktop --bin miclaw_api_bridge_desktop",
+    "build:binaries": "bash scripts/build-binaries.sh"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.1.1",
-    "@tauri-apps/plugin-shell": "^2.0.1",
-    "@tauri-apps/plugin-dialog": "^2.0.1",
-    "@tauri-apps/plugin-clipboard-manager": "^2.0.1",
     "pinia": "^2.2.4",
     "vue": "^3.5.12",
     "vue-router": "^4.4.5"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.1.0",
     "@vitejs/plugin-vue": "^5.1.4",
     "typescript": "^5.6.3",
     "vite": "^5.4.10",
