@@ -20,7 +20,7 @@ async function refreshAuth() {
     auth.value = await api.authStatus();
     if (auth.value?.authenticated) {
       flow.value = "done";
-      message.value = `已登录：${auth.value.nick ?? auth.value.user_id ?? ""}`;
+      message.value = "";
     }
   } catch (e: any) {
     error.value = String(e);
@@ -52,8 +52,8 @@ async function doLogin() {
     const res = await api.login(account.value, password.value, captcha.value || undefined);
     if (res.outcome === "authenticated") {
       flow.value = "done";
-      message.value = `登录成功：${res.nick ?? account.value}`;
       auth.value = await api.authStatus();
+      message.value = "";
     } else if (res.outcome === "two_factor_required") {
       flow.value = "two_factor";
       options.value = res.options;
@@ -94,9 +94,9 @@ async function verify() {
   error.value = "";
   try {
     await api.verifyTicket(flag.value, ticket.value);
-    message.value = "验证成功。";
     flow.value = "done";
     auth.value = await api.authStatus();
+    message.value = "";
   } catch (e: any) {
     error.value = String(e);
   } finally {

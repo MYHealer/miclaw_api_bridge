@@ -18,12 +18,9 @@ name = "miclaw_api_bridge_desktop"
 path = "src/bin/miclaw_api_bridge_desktop.rs"
 required-features = ["desktop"]
 
-[build-dependencies]
-tauri-build = { version = "2.0", features = [] }
-
 [dependencies]
-# desktop tray runtime (optional; headless CLI does not link Tauri/WebKit)
-tauri = { version = "2.1", optional = true, features = ["tray-icon", "image-png"] }
+# desktop tray runtime (optional; headless CLI does not link GUI crates)
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 
 # async runtime
 tokio = { version = "1.41", features = ["full"] }
@@ -78,8 +75,13 @@ open = "5.3"
 [target.'cfg(target_os = "linux")'.dependencies]
 # keyring's Linux Secret Service backend needs an explicit runtime + crypto selection.
 secret-service = { version = "4.0", features = ["rt-tokio-crypto-rust"] }
+ksni = { version = "0.2.2", optional = true }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tao = { version = "0.35", optional = true }
+tray-icon = { version = "0.23", optional = true, default-features = false }
 
 [features]
 default = []
-desktop = ["dep:tauri"]
-custom-protocol = ["tauri?/custom-protocol"]
+desktop = ["dep:image", "dep:ksni", "dep:tao", "dep:tray-icon"]
+custom-protocol = []

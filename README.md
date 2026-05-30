@@ -65,6 +65,7 @@ Eight models are exposed, all routed through the official Xiaomi PC channel:
 4. OpenAI / Responses / Anthropic endpoints are available immediately on the same port.
 
 Desktop users can launch `miclaw_api_bridge_desktop` instead. It starts the same local service, opens the WebUI in your default browser, and adds a tray icon with **打开webui** / **退出**.
+On Linux, the tray launcher uses the desktop session's StatusNotifierItem/D-Bus tray; headless machines should run `miclaw_api_bridge server`.
 
 For remote/headless servers, keep the default localhost binding and use an SSH tunnel:
 
