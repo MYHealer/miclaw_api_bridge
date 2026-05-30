@@ -1,0 +1,14 @@
+services:
+  miclaw_api_bridge:
+    build: .
+    image: miclaw_api_bridge:latest
+    container_name: miclaw_api_bridge
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./data:/data
+    environment:
+      MICLAW_API_BRIDGE_DISABLE_KEYRING: "1"
+      RUST_LOG: "miclaw_api_bridge_lib=info"
+

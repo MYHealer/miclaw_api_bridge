@@ -143,14 +143,19 @@ pub struct LoginTransport {
 const SESSION_BLOB: &str = "session";
 const KEYRING_SERVICE: &str = "com.neoruaa.miclaw-api-bridge";
 const KEYRING_USER: &str = "session";
+const DISABLE_KEYRING_ENV: &str = "MICLAW_API_BRIDGE_DISABLE_KEYRING";
 
 impl AuthState {
     pub fn load(storage: &Storage) -> Result<Self> {
         // Prefer the OS keyring; fall back to the on-disk blob from earlier
         // versions so people who upgrade keep their session.
-        let session = match keyring_load() {
-            Ok(Some(s)) => s,
-            _ => storage.load_blob(SESSION_BLOB)?.unwrap_or_default(),
+        let session = if keyring_disabled() {
+            storage.load_blob(SESSION_BLOB)?.unwrap_or_default()
+        } else {
+            match keyring_load() {
+                Ok(Some(s)) => s,
+                _ => storage.load_blob(SESSION_BLOB)?.unwrap_or_default(),
+            }
         };
         Ok(Self {
             session,
@@ -160,6 +165,11 @@ impl AuthState {
     }
 
     pub fn save(&self, storage: &Storage) -> Result<()> {
+        if keyring_disabled() {
+            storage.save_blob(SESSION_BLOB, &self.session)?;
+            return Ok(());
+        }
+
         if let Err(e) = keyring_save(&self.session) {
             tracing::warn!(
                 target = "auth",
@@ -174,7 +184,9 @@ impl AuthState {
     }
 
     pub fn clear(storage: &Storage) -> Result<()> {
-        let _ = keyring_clear();
+        if !keyring_disabled() {
+            let _ = keyring_clear();
+        }
         storage.delete_blob(SESSION_BLOB)?;
         Ok(())
     }
@@ -196,6 +208,17 @@ impl AuthState {
     pub fn reset_transport(&self) {
         *self.transport.lock() = None;
     }
+}
+
+fn keyring_disabled() -> bool {
+    std::env::var(DISABLE_KEYRING_ENV)
+        .map(|v| {
+            matches!(
+                v.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn keyring_entry() -> Result<keyring::Entry> {

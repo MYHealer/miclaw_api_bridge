@@ -1,0 +1,10 @@
+.git
+.cache
+.DS_Store
+node_modules
+dist
+target-local
+src-tauri/target
+src-tauri/gen
+*.log
+

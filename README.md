@@ -2,7 +2,7 @@
 
 # miclaw_api_bridge
 
-**Run Xiaomi mimo locally as an OpenAI / Anthropic-compatible endpoint.**
+**Run Xiaomi miclaw's models locally as an OpenAI / Anthropic-compatible endpoint.**
 
 Sign in with a miclaw-permissioned Xiaomi account, then hit `http://127.0.0.1:8765` from any browser, OpenAI client, or Claude-compatible client.
 
@@ -72,6 +72,45 @@ For remote/headless servers, keep the default localhost binding and use an SSH t
 ```bash
 ssh -L 8765:127.0.0.1:8765 user@server
 ```
+
+### Docker / NAS
+
+Build and run the headless WebUI/proxy image:
+
+```bash
+docker compose up -d --build
+```
+
+Then open `http://<nas-ip>:8765` and sign in from the browser. The OpenAI-compatible base URL is:
+
+```
+http://<nas-ip>:8765/v1
+```
+
+If you publish the repository's Docker workflow, tags are pushed to GitHub Container Registry as `ghcr.io/<owner>/<repo>:latest` and `ghcr.io/<owner>/<repo>:vX.Y.Z`. Pulling a published image looks like:
+
+```bash
+docker run -d \
+  --name miclaw_api_bridge \
+  --restart unless-stopped \
+  -p 8765:8765 \
+  -v "$PWD/data:/data" \
+  ghcr.io/<owner>/<repo>:latest
+```
+
+Local build equivalent:
+
+```bash
+docker build -t miclaw_api_bridge:latest .
+docker run -d \
+  --name miclaw_api_bridge \
+  --restart unless-stopped \
+  -p 8765:8765 \
+  -v "$PWD/data:/data" \
+  miclaw_api_bridge:latest
+```
+
+The Docker image binds `0.0.0.0:8765` inside the container and disables OS keyring access by default because NAS/container environments usually do not provide macOS Keychain, Windows DPAPI, or Linux Secret Service. Session data is persisted under the mounted `/data` volume; keep that directory private.
 
 ### Hooking up a client
 
@@ -146,6 +185,7 @@ The release workflow produces:
 - Windows ARM64 zip: headless server + desktop tray `.exe` binaries
 - Linux x64 tar.gz: headless server + desktop tray binaries
 - Linux ARM64 tar.gz: headless server + desktop tray binaries
+- Docker image: `linux/amd64` + `linux/arm64` pushed to GHCR by `.github/workflows/docker.yml`
 
 Linux and Windows ARM64 releases are built on native GitHub-hosted ARM runners, not emulated cross-builds.
 
@@ -167,9 +207,9 @@ cargo test --test smoke_login -- --ignored --nocapture
 
 ```
 ┌─────────────────┐
-│ Browser WebUI   │   /api/*      ┌──────────────────────────┐
-│ Login / Status  │◄─────────────►│ Rust headless server     │
-│ Logs panel      │   SSE logs     │ optional desktop tray    │
+│ Browser WebUI   │     /api/*     ┌──────────────────────────┐
+│ Login / Status  │◄──────────────►│ Rust headless server     │
+│ Logs panel      │    SSE logs    │ optional desktop tray    │
 └─────────────────┘                └────────────┬─────────────┘
                                                 │ axum on 127.0.0.1:8765
                                                 ▼
@@ -221,6 +261,7 @@ A 401 from any mimo call triggers a transparent re-run of steps 2–3.
 | Listen port | Dashboard ▸ "Listen port" | `8765` |
 | Listen host | CLI `server --host` | `127.0.0.1` |
 | OAuth `sid` | env `MIMO_BRIDGE_SID` | `miclaw` |
+| Disable OS keyring | env `MICLAW_API_BRIDGE_DISABLE_KEYRING=1` | off |
 | Session storage | OS keyring (auto) | n/a |
 
 ## FAQ
@@ -235,7 +276,7 @@ Yes. miclaw_api_bridge talks directly to Xiaomi's account and inference endpoint
 Xiaomi mints `serviceToken`s scoped to a specific `sid`. Password login uses `sid=miclaw`, but mimo only accepts tokens minted under `sid=osbotapi`. The second leg swaps the former for the latter using the long-lived `passToken`.
 
 **Where are my credentials stored?**
-Encrypted in your OS keyring (macOS Keychain / Windows DPAPI / Linux Secret Service). Only the session blob — `passToken / serviceToken / userId / cUserId / ssecurity / nick` — is kept; your password is never persisted.
+Encrypted in your OS keyring (macOS Keychain / Windows DPAPI / Linux Secret Service). Only the session blob — `passToken / serviceToken / userId / cUserId / ssecurity / nick` — is kept; your password is never persisted. Docker sets `MICLAW_API_BRIDGE_DISABLE_KEYRING=1`, so the session blob is stored in the mounted `/data` volume instead.
 
 **Can I run multiple accounts?**
 Not yet. Tracking under [#multi-account](../../issues).
