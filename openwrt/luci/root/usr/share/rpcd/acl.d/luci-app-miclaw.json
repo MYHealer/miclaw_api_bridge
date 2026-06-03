@@ -1,0 +1,14 @@
+{
+	"luci-app-miclaw": {
+		"description": "Grant access to Mimo Bridge LuCI app",
+		"read": {
+			"uci": [ "miclaw_api_bridge" ],
+			"ubus": {
+				"service": [ "list" ]
+			}
+		},
+		"write": {
+			"uci": [ "miclaw_api_bridge" ]
+		}
+	}
+}

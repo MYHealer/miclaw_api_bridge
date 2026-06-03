@@ -4,6 +4,7 @@ dist-ssr
 *.local
 .cache
 target-local
+openwrt/out
 
 # editors
 .vscode/*

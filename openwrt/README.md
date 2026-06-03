@@ -1,0 +1,228 @@
+# miclaw_api_bridge on OpenWrt (LuCI 插件)
+
+把 `miclaw_api_bridge` 的 headless server 跑在路由器上，并在 LuCI 后台里通过
+iframe 直接嵌入它自带的 WebUI（登录 / 状态 / 日志面板）。前端代码零改动。
+
+目标设备：**mediatek/mt7981**（ARM Cortex-A53，64 位）
+固件：ImmortalWrt 24.10-SNAPSHOT / LuCI openwrt-24.10。
+
+```
+┌──────────────────────────────────────────────┐
+│ 浏览器                                          │
+│  http://192.168.1.1/  →  LuCI (uhttpd, :80)     │
+│    └─ 服务 ▸ Mimo Bridge                        │
+│         <iframe src="http://192.168.1.1:8765/"> │
+└───────────────┬────────────────────────────────┘
+                │ 同源相对请求 /api /v1
+                ▼
+   miclaw_api_bridge server  (procd 常驻, :8765, 0.0.0.0)
+                │
+                ▼
+   api.miclaw.xiaomi.net  (小米账号 + mimo 推理)
+```
+
+## 为什么可行
+
+- 后端是纯 headless 的 axum HTTP 服务，`server --host 0.0.0.0` 即可被局域网访问。
+- WebUI 用 hash 路由 + 相对资源路径（vite `base: "./"`），API 走同源 `/api`、`/v1`，
+  iframe 指向 `:8765/` 就能加载完整界面，**前端一行都不用改**。
+- server 二进制（不带 `desktop` feature）在 `aarch64-unknown-linux-musl` 下无任何
+  C 库依赖（reqwest 用 rustls，keyring 用纯 Rust 的 zbus 后端），可静态交叉编译。
+- OpenWrt 没有 Secret Service / keyring，用现成的环境变量
+  `MICLAW_API_BRIDGE_DISABLE_KEYRING=1` 走磁盘存储，session 落在 `/etc/miclaw_api_bridge`。
+
+## 安全提示
+
+server 监听 `0.0.0.0:8765` 且 WebUI / 代理**没有任何鉴权**，局域网内任何人都能
+访问你的登录态和模型代理。请确保：
+
+- 仅在可信内网使用；不要把 8765 端口通过防火墙暴露到 WAN。
+- 默认 init 脚本不开放防火墙端口，访问只走 LuCI 内嵌 iframe（同一台路由）。
+
+## 步骤一：交叉编译 aarch64-musl 二进制
+
+在开发机（macOS / Linux）上执行：
+
+```bash
+# 需要 docker（脚本用 cross 容器交叉编译，免去本地装 musl 工具链）
+bash openwrt/build-openwrt.sh
+```
+
+产物：
+
+- `openwrt/out/luci-app-miclaw_0.1.0-1_aarch64_cortex-a53.ipk` —— **可直接 `opkg install` 的安装包**（推荐）
+- `openwrt/out/miclaw_api_bridge` —— aarch64 静态二进制（已 strip，约 9.5M）
+- `openwrt/out/miclaw_api_bridge_openwrt_aarch64.tar.gz` —— tarball + `install.sh`（不想用 opkg 时的备选）
+
+> 手动方式见本文件末尾「附录：不用 cross 的手动交叉编译」。
+
+## 步骤二：安装（opkg，推荐）
+
+`build-ipk.sh` 直接产出符合当前 OpenWrt 格式（gzip-tar 容器）的 ipk，**不需要
+OpenWrt SDK**，已在真实 OpenWrt 24.10 rootfs 中实测 `opkg install` 通过。
+
+```bash
+ROUTER=root@192.168.1.1
+
+scp openwrt/out/luci-app-miclaw_0.1.0-1_aarch64_cortex-a53.ipk $ROUTER:/tmp/
+ssh $ROUTER 'opkg install /tmp/luci-app-miclaw_0.1.0-1_aarch64_cortex-a53.ipk'
+```
+
+opkg 会自动：装好全部文件、跑 `postinst`（enable + start 服务、刷新 LuCI 缓存）。
+`/etc/config/miclaw_api_bridge` 标记为 conffile，升级时不会覆盖你的改动。
+
+卸载：`opkg remove luci-app-miclaw`（`prerm` 会先停服务）。
+
+验证：`curl http://192.168.1.1:8765/api/proxy/status` 返回 JSON；浏览器打开 LuCI，
+**服务 (Services) ▸ Mimo Bridge** 即出现内嵌 WebUI。
+
+> 包架构是 `aarch64_cortex-a53`（mt7981 / mediatek-filogic）。如果 opkg 抱怨架构
+> 不匹配，用 `opkg install --force-architecture ...`，或先确认固件包架构：
+> `opkg print-architecture`。
+
+### 让 session 在 sysupgrade 后保留
+
+ipk 已把 `/etc/config/miclaw_api_bridge` 设为 conffile（固件升级保留）。登录态存在
+`/etc/miclaw_api_bridge/`，要保留它，把这行加进 `/etc/sysupgrade.conf`：
+
+```
+/etc/miclaw_api_bridge/
+```
+
+## 步骤二（备选）：tarball + install.sh
+
+不想用 opkg、或想看清每一步做了什么，可以用 tarball：
+
+```bash
+ROUTER=root@192.168.1.1
+
+scp openwrt/out/miclaw_api_bridge_openwrt_aarch64.tar.gz $ROUTER:/tmp/
+ssh $ROUTER
+# --- 以下在路由器上 ---
+cd /tmp
+tar -xzf miclaw_api_bridge_openwrt_aarch64.tar.gz
+cd miclaw_api_bridge_openwrt
+sh install.sh
+```
+
+卸载：`sh uninstall.sh`（保留配置）或 `sh uninstall.sh --purge`（连登录态一起删）。
+
+## 附录：手动分步部署（不想用 install.sh）
+
+如果你想自己掌控每一步，bundle 解压后的文件就是按目标路径组织的：
+
+```bash
+ROUTER=root@192.168.1.1
+cd miclaw_api_bridge_openwrt
+
+# 1. 二进制
+scp miclaw_api_bridge $ROUTER:/usr/bin/miclaw_api_bridge
+ssh $ROUTER 'chmod +x /usr/bin/miclaw_api_bridge'
+
+# 2. procd 服务 + UCI 配置
+scp files/etc/init.d/miclaw_api_bridge $ROUTER:/etc/init.d/miclaw_api_bridge
+ssh $ROUTER 'chmod +x /etc/init.d/miclaw_api_bridge'
+scp files/etc/config/miclaw_api_bridge $ROUTER:/etc/config/miclaw_api_bridge
+
+# 3. 启动并设开机自启
+ssh $ROUTER '/etc/init.d/miclaw_api_bridge enable; /etc/init.d/miclaw_api_bridge start'
+```
+
+### 手动安装 LuCI 插件
+
+`install.sh` 已经帮你做了这一步；只有在手动分步部署时才需要。LuCI openwrt-24.10
+(25.087) 默认是**客户端 JS 框架**（不依赖 Lua 控制器），插件就是一个 view JS +
+一个 menu 注册 + 一个 ACL 文件，三个文件直接铺到对应路径：
+
+```bash
+ROUTER=root@192.168.1.1
+
+# 1. view（iframe 嵌入逻辑）
+ssh $ROUTER 'mkdir -p /www/luci-static/resources/view/miclaw'
+scp luci/htdocs/luci-static/resources/view/miclaw/overview.js \
+    $ROUTER:/www/luci-static/resources/view/miclaw/overview.js
+
+# 2. 菜单注册
+ssh $ROUTER 'mkdir -p /usr/share/luci/menu.d'
+scp luci/root/usr/share/luci/menu.d/luci-app-miclaw.json \
+    $ROUTER:/usr/share/luci/menu.d/luci-app-miclaw.json
+
+# 3. ACL（授予读 uci / 调 service list 权限）
+ssh $ROUTER 'mkdir -p /usr/share/rpcd/acl.d'
+scp luci/root/usr/share/rpcd/acl.d/luci-app-miclaw.json \
+    $ROUTER:/usr/share/rpcd/acl.d/luci-app-miclaw.json
+
+# 4. 刷新 LuCI / rpcd 缓存
+ssh $ROUTER 'rm -f /tmp/luci-indexcache; rm -rf /tmp/luci-modulecache 2>/dev/null; \
+             /etc/init.d/rpcd reload; /etc/init.d/uhttpd restart'
+```
+
+刷新浏览器后，LuCI 顶栏 **服务 (Services) ▸ Mimo Bridge** 即出现，点开就是内嵌的
+WebUI。用具备 miclaw 内测权限的小米账号登录即可。
+
+### 关于 HTTPS / 混合内容
+
+view 会自动检测：如果你通过 `https://` 访问 LuCI，而 bridge 是明文 HTTP，浏览器
+会拦截 iframe（混合内容），面板会空白。这时改用 `http://<路由IP>/` 访问 LuCI，
+或点页面上的「在新标签打开」按钮。view 里已经有提示。
+
+> 想做成真正的 .ipk 安装包，见「附录：打包成 ipk」。
+
+## CI：GitHub Actions 自动构建
+
+`.github/workflows/openwrt.yml` 已接入：
+
+- 手动触发（workflow_dispatch）或 push `v*` tag 时运行；
+- 在 ubuntu runner 上构建 WebUI → 用 `cross` 交叉编译 aarch64-musl → 打 tarball bundle + 构建 ipk；
+- 产物上传为 workflow artifact `openwrt-aarch64`（含 `.tar.gz` 和 `.ipk`）；
+- 若是 tag 触发，两个产物都会附加到对应的 draft Release（和现有 release.yml 同名同 tag，
+  追加资产而非覆盖）。ipk 版本号取自 tag（去掉前缀 `v`）。
+
+打 tag 即可同时产出桌面/服务端二进制（release.yml）、Docker 镜像（docker.yml）和
+OpenWrt tarball + ipk（openwrt.yml）：
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+## 附录：不用 cross 的手动交叉编译
+
+如果你已经有 OpenWrt SDK 或 musl 工具链：
+
+```bash
+rustup target add aarch64-unknown-linux-musl
+cd .. && pnpm install && pnpm build          # 先产出 dist/（会被 rust-embed 内嵌）
+cd src-tauri
+
+# 指定 musl 链接器（按你的工具链路径调整）
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc
+cargo build --release --no-default-features \
+  --target aarch64-unknown-linux-musl --bin miclaw_api_bridge
+
+# 产物
+ls -lh target/aarch64-unknown-linux-musl/release/miclaw_api_bridge
+
+# 然后手动构建 ipk（不依赖 SDK）
+cd ..
+bash openwrt/build-ipk.sh src-tauri/target/aarch64-unknown-linux-musl/release/miclaw_api_bridge
+```
+
+注意：**必须先 `pnpm build` 生成 `dist/`**，否则 `rust-embed` 找不到 WebUI 资源会编译报错。
+
+## ipk 是怎么构建的（无需 SDK）
+
+`openwrt/build-ipk.sh` 直接手工拼出符合当前 OpenWrt 格式的 ipk，不依赖 OpenWrt SDK：
+
+- 当前 OpenWrt（22.03+/24.10）的 ipk 其实是**一个 gzip 压缩的外层 tar**，里面是
+  `./debian-binary`、`./data.tar.gz`、`./control.tar.gz` 三个成员（旧的 `ar` 归档格式
+  已不再使用，这台固件的 opkg 会拒绝 `ar` 格式）。
+- 脚本把二进制 + init + config + LuCI 文件铺到 `data.tar.gz`，把 control/postinst/
+  prerm/postrm/conffiles 放进 `control.tar.gz`，再压成外层 tar。
+- 已在官方 OpenWrt 24.10 arm64 rootfs 容器里实测 `opkg install` 通过。
+
+环境变量可覆盖：`PKG_VERSION`（默认 0.1.0）、`PKG_RELEASE`（默认 1）、
+`PKG_ARCH`（默认 `aarch64_cortex-a53`）。
+
+`openwrt/ipk/luci-app-miclaw/Makefile` 是一个**可选**的 OpenWrt SDK Makefile 骨架，
+仅在你想用官方 SDK/buildroot 构建（比如发布到自定义 feed）时才需要——日常用
+`build-ipk.sh` 即可。

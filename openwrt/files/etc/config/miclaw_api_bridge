@@ -1,0 +1,10 @@
+config miclaw_api_bridge 'main'
+	# 1 = start at boot, 0 = disabled
+	option enabled '1'
+	# Bind address. 0.0.0.0 so the LuCI iframe (and LAN) can reach it.
+	# Use 127.0.0.1 to restrict to the router itself.
+	option host '0.0.0.0'
+	# WebUI + OpenAI/Anthropic proxy port.
+	option port '8765'
+	# 1 = RUST_LOG debug, 0 = info
+	option verbose '0'

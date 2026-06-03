@@ -1,0 +1,13 @@
+{
+	"admin/services/miclaw": {
+		"title": "Mimo Bridge",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "miclaw/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-miclaw" ]
+		}
+	}
+}
