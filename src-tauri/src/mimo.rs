@@ -29,7 +29,7 @@ pub const PATH_RESPONSES: &str = "/osbot/pc/llm/v1/responses";
 pub const PATH_MCP_STREAMABLE: &str = "/osbot/pc/mcp/v1/streamable";
 
 /// Default model when callers don't specify one.
-pub const MODEL_DEFAULT: &str = "mimo-omni";
+pub const MODEL_DEFAULT: &str = "xiaomi/mimo";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -39,44 +39,33 @@ pub struct ModelInfo {
     pub family: String,
 }
 
-/// Models confirmed to work via the PC `osbotapi` channel. Discovered by
-/// probing each candidate name against `/osbot/pc/llm/v1/chat/completions`
-/// and inspecting the upstream `model` field in the response. Names that
-/// 4xx (e.g. plain `mimo-v2-omni` without the `xiaomi/` prefix, or
-/// `xiaomi/mimo-omni` with it) are deliberately omitted.
+/// Models confirmed to work via the PC `osbotapi` channel. Mirrors the
+/// `mify` cloud registry shipped in the miclaw client (decompiled
+/// `cb.a#f8005b`), with each id re-verified against
+/// `/osbot/pc/llm/v1/chat/completions` by inspecting the upstream `model`
+/// field in the response.
 ///
 /// Notes:
 /// * The bridge passes `model` through verbatim — the upstream router
-///   handles canonicalization (e.g. `mimo-pro-1m` → `mimo-pro` with a 1M
-///   context window).
-/// * `xiaomi/qwen35_9B` is hosted on vLLM and uses a slightly different
-///   response shape (extra `refusal` / `annotations` / `token_ids` fields)
-///   but is OpenAI-compatible at the level any sane client cares about.
+///   handles canonicalization (`xiaomi/mimo-claw-0301` echoes back as
+///   `mimo-pro`, the `mimo-omni`/`mimo` aliases echo as `mimo`).
+/// * `mimo-omni` / `mimo-pro` are kept as short back-compat aliases for
+///   existing client configs; both still resolve upstream. The client-side
+///   `mimo-v2.5` / `mimo-v2.5-pro` aliases are intentionally excluded — the
+///   PC channel 4xxs them (they are normalized inside the app, not upstream).
 pub fn known_models() -> Vec<ModelInfo> {
     vec![
         ModelInfo {
-            id: "mimo-omni".into(),
+            id: "xiaomi/mimo".into(),
             object: "model".into(),
             owned_by: "xiaomi".into(),
             family: "chat (multimodal, 256K)".into(),
         },
         ModelInfo {
-            id: "mimo-pro".into(),
-            object: "model".into(),
-            owned_by: "xiaomi".into(),
-            family: "chat (reasoning)".into(),
-        },
-        ModelInfo {
-            id: "mimo-pro-1m".into(),
-            object: "model".into(),
-            owned_by: "xiaomi".into(),
-            family: "chat (reasoning, 1M context)".into(),
-        },
-        ModelInfo {
             id: "xiaomi/mimo-pro".into(),
             object: "model".into(),
             owned_by: "xiaomi".into(),
-            family: "chat (reasoning, alias)".into(),
+            family: "chat (reasoning, 256K)".into(),
         },
         ModelInfo {
             id: "xiaomi/mimo-claw-0301".into(),
@@ -85,22 +74,34 @@ pub fn known_models() -> Vec<ModelInfo> {
             family: "chat (claw 0301 snapshot)".into(),
         },
         ModelInfo {
-            id: "xiaomi/mimo-v2-omni".into(),
+            id: "xiaomi/MiniMax-M2.5".into(),
             object: "model".into(),
             owned_by: "xiaomi".into(),
-            family: "chat (v2 multimodal)".into(),
+            family: "chat (MiniMax M2.5)".into(),
         },
         ModelInfo {
-            id: "xiaomi/mimo-v2-pro".into(),
+            id: "xiaomi/kimi-k2.5".into(),
             object: "model".into(),
             owned_by: "xiaomi".into(),
-            family: "chat (v2 reasoning)".into(),
+            family: "chat (Kimi K2.5, reasoning)".into(),
         },
         ModelInfo {
-            id: "xiaomi/qwen35_9B".into(),
+            id: "xiaomi/glm-5".into(),
             object: "model".into(),
-            owned_by: "siliconflow".into(),
-            family: "chat (Qwen 3.5 9B via vLLM)".into(),
+            owned_by: "xiaomi".into(),
+            family: "chat (GLM-5)".into(),
+        },
+        ModelInfo {
+            id: "mimo-omni".into(),
+            object: "model".into(),
+            owned_by: "xiaomi".into(),
+            family: "chat (multimodal alias → xiaomi/mimo)".into(),
+        },
+        ModelInfo {
+            id: "mimo-pro".into(),
+            object: "model".into(),
+            owned_by: "xiaomi".into(),
+            family: "chat (reasoning alias → xiaomi/mimo-pro)".into(),
         },
     ]
 }

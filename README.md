@@ -26,18 +26,18 @@ miclaw_api_bridge logs into your Xiaomi account the same way the official **Xiao
 
 > ⚠️ **Account requirement**: your Xiaomi account must already be approved for miclaw access. If the WebUI shows "需要 miclaw 内测权限" or the proxy returns 401 right after login, the account isn't allowlisted — apply through the official miclaw channel first.
 
-Eight models are exposed, all routed through the official Xiaomi PC channel:
+Eight model ids are exposed, all routed through the official Xiaomi PC channel. The first six mirror the current miclaw cloud registry; the last two are short back-compat aliases:
 
 | Model id | Notes |
 |---|---|
-| `mimo-omni` | Multimodal, 256 K context (default) |
-| `mimo-pro` | Reasoning model with `thinking` traces |
-| `mimo-pro-1m` | Same as `mimo-pro` with 1 M context |
-| `xiaomi/mimo-pro` | Alias for clients that prefer the Android-style id |
-| `xiaomi/mimo-claw-0301` | Claw 0301 snapshot |
-| `xiaomi/mimo-v2-omni` | v2 multimodal |
-| `xiaomi/mimo-v2-pro` | v2 reasoning |
-| `xiaomi/qwen35_9B` | Qwen 3.5 9B (vLLM-hosted, OpenAI-compatible) |
+| `xiaomi/mimo` | Multimodal, 256 K context (default) |
+| `xiaomi/mimo-pro` | Reasoning model with `thinking` traces, 256 K context |
+| `xiaomi/mimo-claw-0301` | Claw 0301 reasoning snapshot |
+| `xiaomi/MiniMax-M2.5` | MiniMax M2.5, 128 K context |
+| `xiaomi/kimi-k2.5` | Kimi K2.5 reasoning, 128 K context |
+| `xiaomi/glm-5` | GLM-5, 128 K context |
+| `mimo-omni` | Alias → `xiaomi/mimo` |
+| `mimo-pro` | Alias → `xiaomi/mimo-pro` |
 
 ## Features
 
