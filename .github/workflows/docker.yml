@@ -38,9 +38,11 @@ jobs:
         shell: bash
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          date_ver="$(TZ=Asia/Shanghai date +'%y%m%d')"
           {
             echo "tags<<EOF"
             echo "${image}:latest"
+            echo "${image}:${date_ver}"
             if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
               echo "${image}:${GITHUB_REF_NAME}"
             fi
