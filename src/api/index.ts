@@ -62,4 +62,7 @@ export const api = {
   proxyStatus: () => request<ProxySnapshot>("/api/proxy/status"),
   setProxyPort: (port: number) => post<ProxySnapshot>("/api/settings/port", { port }),
   listModels: () => request<ModelInfo[]>("/api/models"),
+  getVerboseLogs: () => request<{ enabled: boolean }>("/api/logs/verbose"),
+  setVerboseLogs: (enabled: boolean) =>
+    post<{ enabled: boolean }>("/api/logs/verbose", { enabled }),
 };

@@ -93,6 +93,10 @@ pub fn router(state: Arc<BridgeState>) -> Router {
         .route("/api/settings/port", post(api_set_port))
         .route("/api/models", get(api_models))
         .route("/api/logs", get(api_logs))
+        .route(
+            "/api/logs/verbose",
+            get(api_logs_verbose_get).post(api_logs_verbose_set),
+        )
         .route("/api/logs/stream", get(api_logs_stream))
         .with_state(state.clone());
 
@@ -160,6 +164,23 @@ async fn api_models(State(_state): State<Arc<BridgeState>>) -> Response {
 
 async fn api_logs(State(state): State<Arc<BridgeState>>) -> Response {
     Json(state.logs.snapshot()).into_response()
+}
+
+async fn api_logs_verbose_get(State(state): State<Arc<BridgeState>>) -> Response {
+    Json(json!({ "enabled": state.proxy.verbose() })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct VerboseRequest {
+    enabled: bool,
+}
+
+async fn api_logs_verbose_set(
+    State(state): State<Arc<BridgeState>>,
+    Json(req): Json<VerboseRequest>,
+) -> Response {
+    state.proxy.set_verbose(req.enabled);
+    Json(json!({ "enabled": req.enabled })).into_response()
 }
 
 async fn api_logs_stream(

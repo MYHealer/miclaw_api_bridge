@@ -49,6 +49,22 @@ pub fn emit_log(ctrl: &ProxyController, payload: Value) {
     ctrl.emitter.emit(payload);
 }
 
+/// Build a `request` log entry. When verbose logging is on, the full request
+/// body (including the prompt) is attached so the WebUI can expand it.
+pub fn request_log(ctrl: &ProxyController, path: &str, body: &Value) -> Value {
+    let mut entry = json!({
+        "ts": chrono::Utc::now().timestamp_millis(),
+        "kind": "request",
+        "path": path,
+        "model": body.get("model").and_then(|v| v.as_str()).unwrap_or(""),
+        "stream": body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
+    });
+    if ctrl.verbose() {
+        entry["body"] = body.clone();
+    }
+    entry
+}
+
 /// Forward a JSON request to mimo, streaming the upstream bytes back.
 pub async fn forward(ctrl: Arc<ProxyController>, upstream_path: &str, body: Value) -> Response {
     let stream_requested = body
@@ -65,20 +81,15 @@ pub async fn forward(ctrl: Arc<ProxyController>, upstream_path: &str, body: Valu
         target = "proxy",
         "→ mimo {upstream_path} stream={stream_requested} model={model}"
     );
-    emit_log(
-        &ctrl,
-        json!({
-            "ts": chrono::Utc::now().timestamp_millis(),
-            "kind": "request",
-            "path": upstream_path,
-            "model": model,
-            "stream": stream_requested,
-        }),
-    );
+    emit_log(&ctrl, request_log(&ctrl, upstream_path, &body));
     match ctrl.mimo.post_json(upstream_path, body).await {
         Ok(upstream) => {
             let status = upstream.status();
             tracing::debug!(target = "proxy", "← mimo {upstream_path} status={status}");
+            if ctrl.verbose() {
+                return buffered_response_with_log(&ctrl, upstream_path, status, started, upstream)
+                    .await;
+            }
             emit_log(
                 &ctrl,
                 json!({
@@ -106,6 +117,47 @@ pub async fn forward(ctrl: Arc<ProxyController>, upstream_path: &str, body: Valu
             map_err(e)
         }
     }
+}
+
+/// Buffer the full upstream response so its body (the model's reply) can be
+/// attached to a `response` log entry, then return it to the caller. Used
+/// only in verbose mode; trades streaming for inspectability.
+async fn buffered_response_with_log(
+    ctrl: &ProxyController,
+    path: &str,
+    status: reqwest::StatusCode,
+    started: std::time::Instant,
+    upstream: reqwest::Response,
+) -> Response {
+    let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
+    let bytes = upstream.bytes().await.unwrap_or_default();
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    let body_val = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
+    emit_log(
+        ctrl,
+        json!({
+            "ts": chrono::Utc::now().timestamp_millis(),
+            "kind": "response",
+            "path": path,
+            "status": status.as_u16(),
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+            "body": body_val,
+        }),
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        content_type.unwrap_or_else(|| header::HeaderValue::from_static("application/json")),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
+    let mut resp = Response::new(Body::from(bytes));
+    *resp.status_mut() = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    *resp.headers_mut() = headers;
+    resp
 }
 
 pub async fn proxy_response(upstream: reqwest::Response) -> Response {

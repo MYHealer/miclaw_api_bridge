@@ -49,13 +49,7 @@ async fn responses_passthrough_or_compat(ctrl: Arc<ProxyController>, body: Value
     let started = std::time::Instant::now();
     emit_log(
         &ctrl,
-        json!({
-            "ts": chrono::Utc::now().timestamp_millis(),
-            "kind": "request",
-            "path": crate::mimo::PATH_RESPONSES,
-            "model": body.get("model").and_then(|v| v.as_str()).unwrap_or(""),
-            "stream": body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
-        }),
+        super::transport::request_log(&ctrl, crate::mimo::PATH_RESPONSES, &body),
     );
 
     match ctrl

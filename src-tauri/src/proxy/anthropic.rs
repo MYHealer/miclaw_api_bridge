@@ -55,16 +55,17 @@ pub async fn messages(
         .unwrap_or(crate::mimo::MODEL_DEFAULT)
         .to_string();
     let started = std::time::Instant::now();
-    super::emit_log(
-        &ctrl,
-        json!({
-            "ts": chrono::Utc::now().timestamp_millis(),
-            "kind": "request",
-            "path": "/v1/messages",
-            "model": model.clone(),
-            "stream": stream_requested,
-        }),
-    );
+    let mut req_log = json!({
+        "ts": chrono::Utc::now().timestamp_millis(),
+        "kind": "request",
+        "path": "/v1/messages",
+        "model": model.clone(),
+        "stream": stream_requested,
+    });
+    if ctrl.verbose() {
+        req_log["body"] = body.clone();
+    }
+    super::emit_log(&ctrl, req_log);
 
     match ctrl.mimo.chat(openai_body).await {
         Ok(upstream) => {
