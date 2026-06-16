@@ -35,10 +35,16 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
-      - name: Install nightly Rust (with rust-src)
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
         with:
-          components: rust-src
+          targets: ${{ env.TARGET }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: openwrt-${{ env.TARGET }}
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -46,24 +52,14 @@ jobs:
       - name: Build WebUI
         run: pnpm build
 
-      # Build musl cross-compiler from source using musl-cross-make
-      - name: Build mipsel musl cross-compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-mipsel-linux-gnu g++-mipsel-linux-gnu make
-          git clone https://github.com/richfelker/musl-cross-make.git /tmp/mcm
-          cd /tmp/mcm
-          make TARGET=mipsel-linux-musl GCC_VER=13.2.0 BINUTILS_VER=2.42 MUSL_VER=1.2.5 -j$(nproc)
-          sudo cp -r output/mipsel-linux-musl/* /usr/local/
-          echo "/usr/local/bin" >> "$GITHUB_PATH"
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
 
-      - name: Cross-compile server binary (build std from source)
+      - name: Cross-compile server binary
         run: |
           set -euo pipefail
           cd src-tauri
-          export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER=mipsel-linux-musl-gcc
-          cargo +nightly build -Z build-std \
-            --release --no-default-features \
+          cross build --release --no-default-features \
             --target "$TARGET" --bin miclaw_api_bridge
 
       - name: Stage + strip binary
@@ -73,7 +69,10 @@ jobs:
           mkdir -p openwrt/out
           BIN="src-tauri/target/$TARGET/release/miclaw_api_bridge"
           cp -f "$BIN" openwrt/out/miclaw_api_bridge
-          mipsel-linux-musl-strip openwrt/out/miclaw_api_bridge || true
+          docker run --rm -v "$PWD:/w" -w /w \
+            ghcr.io/cross-rs/$TARGET:main \
+            $TARGET-strip openwrt/out/miclaw_api_bridge \
+            || llvm-strip openwrt/out/miclaw_api_bridge || true
           file openwrt/out/miclaw_api_bridge || true
 
       - name: Pack deployable bundle
