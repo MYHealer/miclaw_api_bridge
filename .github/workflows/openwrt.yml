@@ -49,20 +49,15 @@ jobs:
 
       - name: Create Zig wrappers (CC + linker)
         run: |
-          # write mipsel-cc wrapper (converts Rust triples to Zig triples)
           echo '#!/bin/sh' > /tmp/mipsel-cc
           echo 'ARGS=""' >> /tmp/mipsel-cc
           echo 'for arg in "$@"; do' >> /tmp/mipsel-cc
           echo '  case "$arg" in' >> /tmp/mipsel-cc
-          echo '    --target=*-unknown-*)' >> /tmp/mipsel-cc
-          echo '      ARGS="$ARGS $(echo "$arg" | sed '"'"'s/-unknown-/-/'"'"')"' >> /tmp/mipsel-cc
-          echo '      ;;' >> /tmp/mipsel-cc
-          echo '    *)' >> /tmp/mipsel-cc
-          echo '      ARGS="$ARGS $arg"' >> /tmp/mipsel-cc
-          echo '      ;;' >> /tmp/mipsel-cc
+          echo '    --target=*) ;;' >> /tmp/mipsel-cc
+          echo '    *) ARGS="$ARGS $arg" ;;' >> /tmp/mipsel-cc
           echo '  esac' >> /tmp/mipsel-cc
           echo 'done' >> /tmp/mipsel-cc
-          echo 'exec zig cc $ARGS' >> /tmp/mipsel-cc
+          echo 'exec zig cc -target mipsel-linux-musl $ARGS' >> /tmp/mipsel-cc
           chmod +x /tmp/mipsel-cc
           cp /tmp/mipsel-cc /tmp/mipsel-linker
 
