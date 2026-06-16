@@ -36,8 +36,6 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: mipsel-unknown-linux-musl
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
