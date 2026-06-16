@@ -58,10 +58,10 @@ jobs:
           echo '    *) ARGS="$ARGS $arg" ;;' >> /tmp/mipsel-cc
           echo '  esac' >> /tmp/mipsel-cc
           echo 'done' >> /tmp/mipsel-cc
-          echo 'exec zig cc -target mipsel-linux-musl $ARGS' >> /tmp/mipsel-cc
+          echo 'exec zig cc -target mipsel-linux-musl -msoft-float $ARGS' >> /tmp/mipsel-cc
           chmod +x /tmp/mipsel-cc
           echo '#!/bin/sh' > /tmp/mipsel-linker
-          echo 'exec mipsel-linux-gnu-gcc -nostdlib -no-pie -Wl,-static -Wl,--defsym=__dso_handle=0 "$@" -lgcc' >> /tmp/mipsel-linker
+          echo 'exec mipsel-linux-gnu-gcc -nostdlib -no-pie -msoft-float -Wl,-static -Wl,--defsym=__dso_handle=0 "$@" -lgcc' >> /tmp/mipsel-linker
           chmod +x /tmp/mipsel-linker
 
       - name: Install frontend dependencies
@@ -76,7 +76,7 @@ jobs:
           cd src-tauri
           export CC_mipsel_unknown_linux_musl=/tmp/mipsel-cc
           export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER=/tmp/mipsel-linker
-          export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C relocation-model=static"
+          export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C relocation-model=static -C target-feature=+soft-float"
           cargo +nightly build -Z build-std \
             --release --no-default-features \
             --target "$TARGET" --bin miclaw_api_bridge
