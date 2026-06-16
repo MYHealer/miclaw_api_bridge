@@ -61,7 +61,7 @@ jobs:
           echo 'exec zig cc -target mipsel-linux-musl -msoft-float $ARGS' >> /tmp/mipsel-cc
           chmod +x /tmp/mipsel-cc
           echo '#!/bin/sh' > /tmp/mipsel-linker
-          echo 'exec mipsel-linux-gnu-gcc -nostdlib -no-pie -msoft-float -Wl,-static -Wl,--defsym=__dso_handle=0 "$@" -lgcc' >> /tmp/mipsel-linker
+          echo 'exec mipsel-linux-gnu-gcc -nostdlib -no-pie -msoft-float -Wl,-static -Wl,--no-dynamic-linker -Wl,--defsym=__dso_handle=0 "$@" -lgcc' >> /tmp/mipsel-linker
           chmod +x /tmp/mipsel-linker
 
       - name: Install frontend dependencies
