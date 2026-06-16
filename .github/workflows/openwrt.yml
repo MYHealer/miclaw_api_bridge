@@ -57,7 +57,7 @@ jobs:
           echo '    *) ARGS="$ARGS $arg" ;;' >> /tmp/mipsel-cc
           echo '  esac' >> /tmp/mipsel-cc
           echo 'done' >> /tmp/mipsel-cc
-          echo 'exec zig cc -target mipsel-linux-musl $ARGS' >> /tmp/mipsel-cc
+          echo 'exec zig cc -target mipsel-linux-musl -fcompiler-rt $ARGS' >> /tmp/mipsel-cc
           chmod +x /tmp/mipsel-cc
           cp /tmp/mipsel-cc /tmp/mipsel-linker
 
