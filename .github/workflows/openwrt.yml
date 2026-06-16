@@ -17,7 +17,7 @@ jobs:
     permissions:
       contents: write
     env:
-      TARGET: aarch64-unknown-linux-musl
+      TARGET: mipsel-unknown-linux-musl
 
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +37,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-unknown-linux-musl
+          targets: mipsel-unknown-linux-musl
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -77,14 +77,14 @@ jobs:
           # cross images ship a target strip; fall back to llvm-strip
           docker run --rm -v "$PWD:/w" -w /w \
             ghcr.io/cross-rs/$TARGET:main \
-            aarch64-linux-musl-strip openwrt/out/miclaw_api_bridge \
+            mipsel-linux-musl-strip openwrt/out/miclaw_api_bridge \
             || llvm-strip openwrt/out/miclaw_api_bridge || true
           file openwrt/out/miclaw_api_bridge || true
 
       - name: Pack deployable bundle
         run: |
           set -euo pipefail
-          NAME="miclaw_api_bridge_${GITHUB_REF_NAME}_openwrt_aarch64.tar.gz"
+          NAME="miclaw_api_bridge_${GITHUB_REF_NAME}_openwrt_mipsel.tar.gz"
           echo "BUNDLE=$NAME" >> "$GITHUB_ENV"
           bash openwrt/pack-bundle.sh openwrt/out/miclaw_api_bridge "openwrt/out/$NAME"
 
@@ -94,9 +94,9 @@ jobs:
           # strip leading 'v' from the tag for the package version (0.1.0 not v0.1.0)
           ver="${GITHUB_REF_NAME#v}"
           [ "$ver" = "$GITHUB_REF_NAME" ] && ver="0.0.0-dev"
-          IPK="luci-app-miclaw_${ver}-1_aarch64_cortex-a53.ipk"
+          IPK="luci-app-miclaw_${ver}-1_mipsel_24kc.ipk"
           echo "IPK=$IPK" >> "$GITHUB_ENV"
-          PKG_VERSION="$ver" PKG_ARCH="aarch64_cortex-a53" \
+          PKG_VERSION="$ver" PKG_ARCH="mipsel_24kc" \
             bash openwrt/build-ipk.sh openwrt/out/miclaw_api_bridge "openwrt/out/$IPK"
 
       - name: Upload workflow artifact
