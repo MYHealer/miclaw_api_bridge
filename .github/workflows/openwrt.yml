@@ -35,18 +35,13 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
-      # Rust 1.83 is the last version that ships prebuilt std for mipsel.
-      - name: Install Rust 1.83
+      # mipsel-unknown-linux-musl is Tier 3 — no prebuilt std.
+      # We use nightly + -Z build-std to compile std from source.
+      - name: Install nightly Rust (with rust-src)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.83.0
-          targets: mipsel-unknown-linux-musl
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: "./src-tauri -> target"
-          key: openwrt-${{ env.TARGET }}
+          toolchain: nightly
+          components: rust-src
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -60,12 +55,13 @@ jobs:
           curl -L https://musl.cc/mipsel-linux-musl-cross.tgz | sudo tar -xJ -C /usr/local
           echo "/usr/local/mipsel-linux-musl-cross/bin" >> "$GITHUB_PATH"
 
-      - name: Cross-compile server binary
+      - name: Cross-compile server binary (build std from source)
         run: |
           set -euo pipefail
           cd src-tauri
           export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER=mipsel-linux-musl-gcc
-          cargo build --release --no-default-features \
+          cargo +nightly build -Z build-std \
+            --release --no-default-features \
             --target "$TARGET" --bin miclaw_api_bridge
 
       - name: Stage + strip binary
