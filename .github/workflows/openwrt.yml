@@ -12,12 +12,14 @@ concurrency:
 
 jobs:
   build:
-    name: Build OpenWrt bundle (aarch64-musl)
+    name: Build OpenWrt bundle (mipsel-musl)
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
       TARGET: mipsel-unknown-linux-musl
+      PKG_ARCH: mipsel_24kc
+      BUILDER_IMAGE: miclaw-mipsel-builder
 
     steps:
       - uses: actions/checkout@v4
@@ -34,36 +36,38 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: "./src-tauri -> target"
-          key: openwrt-${{ env.TARGET }}
-
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Build WebUI
         run: pnpm build
 
-      # musl cross toolchain for the linker. reqwest uses rustls (no OpenSSL)
-      # and the server binary pulls no C deps, so this is enough for a fully
-      # static aarch64 build.
-      - name: Install musl cross toolchain
+      - name: Build cross-compile Docker image
         run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-          cargo install cross --git https://github.com/cross-rs/cross --locked
+          docker build -t "$BUILDER_IMAGE" -f- . <<'DOCKERFILE'
+        FROM rust:1.83-bookworm
+        RUN apt-get update && apt-get install -y --no-install-recommends \
+            ca-certificates pkg-config curl xz-utils \
+            && rm -rf /var/lib/apt/lists/*
+        RUN curl -L https://musl.cc/mipsel-linux-musl-cross.tgz \
+            | tar -xJ -C /usr/local
+        ENV PATH="/usr/local/mipsel-linux-musl-cross/bin:${PATH}"
+        ENV CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER=mipsel-linux-musl-gcc
+        ENV CC_mipsel_unknown_linux_musl=mipsel-linux-musl-gcc
+        RUN rustup target add mipsel-unknown-linux-musl
+        WORKDIR /app
+        DOCKERFILE
 
       - name: Cross-compile server binary
         run: |
           set -euo pipefail
-          cd src-tauri
-          cross build --release --no-default-features \
-            --target "$TARGET" --bin miclaw_api_bridge
+          docker run --rm \
+            -v "$PWD:/app" \
+            -v "$HOME/.cargo/registry:/usr/local/cargo/registry" \
+            -w /app/src-tauri \
+            "$BUILDER_IMAGE" \
+            cargo build --release --no-default-features \
+              --target "$TARGET" --bin miclaw_api_bridge
 
       - name: Stage + strip binary
         id: bin
@@ -72,10 +76,8 @@ jobs:
           mkdir -p openwrt/out
           BIN="src-tauri/target/$TARGET/release/miclaw_api_bridge"
           cp -f "$BIN" openwrt/out/miclaw_api_bridge
-          # cross images ship a target strip; fall back to llvm-strip
-          docker run --rm -v "$PWD:/w" -w /w \
-            ghcr.io/cross-rs/$TARGET:main \
-            mipsel-linux-musl-strip openwrt/out/miclaw_api_bridge \
+          docker run --rm -v "$PWD:/app" "$BUILDER_IMAGE" \
+            mipsel-linux-musl-strip /app/openwrt/out/miclaw_api_bridge \
             || llvm-strip openwrt/out/miclaw_api_bridge || true
           file openwrt/out/miclaw_api_bridge || true
 
@@ -89,18 +91,17 @@ jobs:
       - name: Build opkg ipk
         run: |
           set -euo pipefail
-          # strip leading 'v' from the tag for the package version (0.1.0 not v0.1.0)
           ver="${GITHUB_REF_NAME#v}"
           [ "$ver" = "$GITHUB_REF_NAME" ] && ver="0.0.0-dev"
-          IPK="luci-app-miclaw_${ver}-1_mipsel_24kc.ipk"
+          IPK="luci-app-miclaw_${ver}-1_${PKG_ARCH}.ipk"
           echo "IPK=$IPK" >> "$GITHUB_ENV"
-          PKG_VERSION="$ver" PKG_ARCH="mipsel_24kc" \
+          PKG_VERSION="$ver" PKG_ARCH="$PKG_ARCH" \
             bash openwrt/build-ipk.sh openwrt/out/miclaw_api_bridge "openwrt/out/$IPK"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-aarch64
+          name: openwrt-mipsel
           path: |
             openwrt/out/${{ env.BUNDLE }}
             openwrt/out/${{ env.IPK }}
