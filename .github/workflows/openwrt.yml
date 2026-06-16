@@ -19,7 +19,6 @@ jobs:
     env:
       TARGET: mipsel-unknown-linux-musl
       PKG_ARCH: mipsel_24kc
-      BUILDER_IMAGE: miclaw-mipsel-builder
 
     steps:
       - uses: actions/checkout@v4
@@ -36,38 +35,38 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
+      # Rust 1.83 is the last version that ships prebuilt std for mipsel.
+      - name: Install Rust 1.83
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.83.0
+          targets: mipsel-unknown-linux-musl
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: openwrt-${{ env.TARGET }}
+
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Build WebUI
         run: pnpm build
 
-      - name: Build cross-compile Docker image
+      # musl.cc provides statically-linked musl cross-compilers for any Linux host.
+      - name: Install mipsel musl cross-compiler
         run: |
-          docker build -t "$BUILDER_IMAGE" -f- . <<'DOCKERFILE'
-        FROM rust:1.83-bookworm
-        RUN apt-get update && apt-get install -y --no-install-recommends \
-            ca-certificates pkg-config curl xz-utils \
-            && rm -rf /var/lib/apt/lists/*
-        RUN curl -L https://musl.cc/mipsel-linux-musl-cross.tgz \
-            | tar -xJ -C /usr/local
-        ENV PATH="/usr/local/mipsel-linux-musl-cross/bin:${PATH}"
-        ENV CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER=mipsel-linux-musl-gcc
-        ENV CC_mipsel_unknown_linux_musl=mipsel-linux-musl-gcc
-        RUN rustup target add mipsel-unknown-linux-musl
-        WORKDIR /app
-        DOCKERFILE
+          curl -L https://musl.cc/mipsel-linux-musl-cross.tgz | sudo tar -xJ -C /usr/local
+          echo "/usr/local/mipsel-linux-musl-cross/bin" >> "$GITHUB_PATH"
 
       - name: Cross-compile server binary
         run: |
           set -euo pipefail
-          docker run --rm \
-            -v "$PWD:/app" \
-            -v "$HOME/.cargo/registry:/usr/local/cargo/registry" \
-            -w /app/src-tauri \
-            "$BUILDER_IMAGE" \
-            cargo build --release --no-default-features \
-              --target "$TARGET" --bin miclaw_api_bridge
+          cd src-tauri
+          export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER=mipsel-linux-musl-gcc
+          cargo build --release --no-default-features \
+            --target "$TARGET" --bin miclaw_api_bridge
 
       - name: Stage + strip binary
         id: bin
@@ -76,9 +75,7 @@ jobs:
           mkdir -p openwrt/out
           BIN="src-tauri/target/$TARGET/release/miclaw_api_bridge"
           cp -f "$BIN" openwrt/out/miclaw_api_bridge
-          docker run --rm -v "$PWD:/app" "$BUILDER_IMAGE" \
-            mipsel-linux-musl-strip /app/openwrt/out/miclaw_api_bridge \
-            || llvm-strip openwrt/out/miclaw_api_bridge || true
+          mipsel-linux-musl-strip openwrt/out/miclaw_api_bridge || true
           file openwrt/out/miclaw_api_bridge || true
 
       - name: Pack deployable bundle
