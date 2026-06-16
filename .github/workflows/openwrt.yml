@@ -58,7 +58,7 @@ jobs:
           echo '    *) ARGS="$ARGS $arg" ;;' >> /tmp/mipsel-cc
           echo '  esac' >> /tmp/mipsel-cc
           echo 'done' >> /tmp/mipsel-cc
-          echo 'exec zig cc -target mipsel-linux-musl -march=24kc -msoft-float $ARGS' >> /tmp/mipsel-cc
+          echo 'exec zig cc -target mipsel-linux-musl -msoft-float $ARGS' >> /tmp/mipsel-cc
           chmod +x /tmp/mipsel-cc
           echo '#!/bin/sh' > /tmp/mipsel-linker
           echo 'exec mipsel-linux-gnu-gcc -nostdlib -no-pie -march=24kc -msoft-float -Wl,-static -Wl,--no-dynamic-linker -Wl,--defsym=__dso_handle=0 "$@" -lgcc' >> /tmp/mipsel-linker
