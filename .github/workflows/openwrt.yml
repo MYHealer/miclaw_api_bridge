@@ -35,8 +35,6 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
-      # mipsel-unknown-linux-musl is Tier 3 — no prebuilt std.
-      # We use nightly + -Z build-std to compile std from source.
       - name: Install nightly Rust (with rust-src)
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -49,10 +47,9 @@ jobs:
       - name: Build WebUI
         run: pnpm build
 
-      # musl.cc provides statically-linked musl cross-compilers for any Linux host.
       - name: Install mipsel musl cross-compiler
         run: |
-          curl -L https://musl.cc/mipsel-linux-musl-cross.tgz | sudo tar -xJ -C /usr/local
+          curl -L https://more.musl.cc/11.2.1/x86_64-linux-musl/mipsel-linux-musl-cross.tgz | sudo tar -xJ -C /usr/local
           echo "/usr/local/mipsel-linux-musl-cross/bin" >> "$GITHUB_PATH"
 
       - name: Cross-compile server binary (build std from source)
