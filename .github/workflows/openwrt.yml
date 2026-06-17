@@ -42,13 +42,15 @@ jobs:
           toolchain: nightly
           components: rust-src
 
-      - name: Install Zig + mipsel GCC libs
+      - name: Install Zig + mipsel musl toolchain
         run: |
           curl -L "https://ziglang.org/download/${ZIG_VER}/zig-linux-x86_64-${ZIG_VER}.tar.xz" | sudo tar -xJ -C /usr/local
           echo "/usr/local/zig-linux-x86_64-${ZIG_VER}" >> "$GITHUB_PATH"
-          sudo apt-get update && sudo apt-get install -y gcc-mipsel-linux-gnu
+          curl -L -o /tmp/mipsel-toolchain.tar.xz https://musl.cc/mipsel-linux-musl-cross.tgz
+          sudo tar -xf /tmp/mipsel-toolchain.tar.xz -C /usr/local
+          echo "/usr/local/mipsel-linux-musl-cross/bin" >> "$GITHUB_PATH"
 
-      - name: Create CC wrapper (zig cc) + linker wrapper (gcc -nostdlib)
+      - name: Create CC wrapper (zig cc) + linker wrapper (musl-gcc static)
         run: |
           echo '#!/bin/sh' > /tmp/mipsel-cc
           echo 'ARGS=""' >> /tmp/mipsel-cc
@@ -61,7 +63,7 @@ jobs:
           echo 'exec zig cc -target mipsel-linux-musl -msoft-float $ARGS' >> /tmp/mipsel-cc
           chmod +x /tmp/mipsel-cc
           echo '#!/bin/sh' > /tmp/mipsel-linker
-          echo 'exec mipsel-linux-gnu-gcc -nostdlib -no-pie -march=24kc -msoft-float -Wl,-static -Wl,--no-dynamic-linker -Wl,--defsym=__dso_handle=0 "$@" -lgcc' >> /tmp/mipsel-linker
+          echo 'exec mipsel-linux-musl-gcc -static -march=24kc -msoft-float "$@" -lgcc' >> /tmp/mipsel-linker
           chmod +x /tmp/mipsel-linker
 
       - name: Install frontend dependencies
@@ -76,7 +78,7 @@ jobs:
           cd src-tauri
           export CC_mipsel_unknown_linux_musl=/tmp/mipsel-cc
           export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER=/tmp/mipsel-linker
-          export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C relocation-model=static -C target-feature=+soft-float"
+          export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+soft-float -C target-feature=+crt-static"
           cargo +nightly build -Z build-std --release --no-default-features --target "$TARGET" --bin miclaw_api_bridge
 
       - name: Stage + strip binary
@@ -86,8 +88,7 @@ jobs:
           mkdir -p openwrt/out
           BIN="src-tauri/target/$TARGET/release/miclaw_api_bridge"
           cp -f "$BIN" openwrt/out/miclaw_api_bridge
-          mipsel-linux-gnu-objcopy --remove-section=.interp openwrt/out/miclaw_api_bridge || true
-          mipsel-linux-gnu-strip openwrt/out/miclaw_api_bridge || true
+          mipsel-linux-musl-strip openwrt/out/miclaw_api_bridge || true
           file openwrt/out/miclaw_api_bridge || true
 
       - name: Pack deployable bundle
