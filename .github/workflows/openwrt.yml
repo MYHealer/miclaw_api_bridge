@@ -1,3 +1,4 @@
+
 name: OpenWrt
 
 on:
@@ -42,12 +43,24 @@ jobs:
           toolchain: nightly
           components: rust-src
 
-      - name: Install Zig
+      - name: Install Zig + musl cross-compiler
         run: |
           curl -L "https://ziglang.org/download/${ZIG_VER}/zig-linux-x86_64-${ZIG_VER}.tar.xz" | sudo tar -xJ -C /usr/local
           echo "/usr/local/zig-linux-x86_64-${ZIG_VER}" >> "$GITHUB_PATH"
+          # Download musl.cc with retry + mirror fallback
+          for i in 1 2 3; do
+            curl -fSL --connect-timeout 30 --retry 2 -o /tmp/mipsel-toolchain.tar.xz \n              https://musl.cc/mipsel-linux-musl-cross.tgz && break
+            echo "Attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
+          # Fallback: try SJTU mirror
+          if [ ! -s /tmp/mipsel-toolchain.tar.xz ]; then
+            curl -fSL --connect-timeout 30 -o /tmp/mipsel-toolchain.tar.xz \n              https://mirror.sjtu.edu.cn/musl.cc/mipsel-linux-musl-cross.tgz
+          fi
+          sudo tar -xf /tmp/mipsel-toolchain.tar.xz -C /usr/local
+          echo "/usr/local/mipsel-linux-musl-cross/bin" >> "$GITHUB_PATH"
 
-      - name: Create CC wrapper + linker wrapper (all zig)
+      - name: Create CC wrapper (zig) + linker wrapper (musl-gcc)
         run: |
           echo '#!/bin/sh' > /tmp/mipsel-cc
           echo 'ARGS=""' >> /tmp/mipsel-cc
@@ -60,7 +73,7 @@ jobs:
           echo 'exec zig cc -target mipsel-linux-musl -msoft-float $ARGS' >> /tmp/mipsel-cc
           chmod +x /tmp/mipsel-cc
           echo '#!/bin/sh' > /tmp/mipsel-linker
-          echo 'exec zig cc -target mipsel-linux-musl -msoft-float -static "$@"' >> /tmp/mipsel-linker
+          echo 'exec mipsel-linux-musl-gcc -static -march=24kc -msoft-float "$@" -lgcc' >> /tmp/mipsel-linker
           chmod +x /tmp/mipsel-linker
 
       - name: Install frontend dependencies
@@ -85,7 +98,7 @@ jobs:
           mkdir -p openwrt/out
           BIN="src-tauri/target/$TARGET/release/miclaw_api_bridge"
           cp -f "$BIN" openwrt/out/miclaw_api_bridge
-          zig objcopy --strip-all openwrt/out/miclaw_api_bridge || true
+          mipsel-linux-musl-strip openwrt/out/miclaw_api_bridge || true
           file openwrt/out/miclaw_api_bridge || true
 
       - name: Pack deployable bundle
