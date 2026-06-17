@@ -1,4 +1,3 @@
-
 name: OpenWrt
 
 on:
@@ -49,13 +48,15 @@ jobs:
           echo "/usr/local/zig-linux-x86_64-${ZIG_VER}" >> "$GITHUB_PATH"
           # Download musl.cc with retry + mirror fallback
           for i in 1 2 3; do
-            curl -fSL --connect-timeout 30 --retry 2 -o /tmp/mipsel-toolchain.tar.xz \n              https://musl.cc/mipsel-linux-musl-cross.tgz && break
+            curl -fSL --connect-timeout 30 --retry 2 -o /tmp/mipsel-toolchain.tar.xz \
+              https://musl.cc/mipsel-linux-musl-cross.tgz && break
             echo "Attempt $i failed, retrying in 5s..."
             sleep 5
           done
           # Fallback: try SJTU mirror
           if [ ! -s /tmp/mipsel-toolchain.tar.xz ]; then
-            curl -fSL --connect-timeout 30 -o /tmp/mipsel-toolchain.tar.xz \n              https://mirror.sjtu.edu.cn/musl.cc/mipsel-linux-musl-cross.tgz
+            curl -fSL --connect-timeout 30 -o /tmp/mipsel-toolchain.tar.xz \
+              https://mirror.sjtu.edu.cn/musl.cc/mipsel-linux-musl-cross.tgz
           fi
           sudo tar -xf /tmp/mipsel-toolchain.tar.xz -C /usr/local
           echo "/usr/local/mipsel-linux-musl-cross/bin" >> "$GITHUB_PATH"
