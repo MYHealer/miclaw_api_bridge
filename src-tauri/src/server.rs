@@ -8,6 +8,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use axum_server::tls_rustls::RustlsConfig;
+use axum_server::Handle;
 use futures_util::stream::{self, Stream};
 use rust_embed::RustEmbed;
 use serde::Serialize;
@@ -16,7 +18,7 @@ use std::borrow::Cow;
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use tokio::sync::oneshot;
+use std::time::Duration;
 use tower_http::cors::CorsLayer;
 
 #[derive(Debug, Clone)]
@@ -36,49 +38,116 @@ impl Default for ServerConfig {
 
 pub struct HttpServer {
     pub addr: SocketAddr,
-    shutdown: Option<oneshot::Sender<()>>,
+    pub tls: bool,
+    handle: Option<Handle>,
     state: Arc<BridgeState>,
 }
 
 impl HttpServer {
     pub fn webui_url(&self) -> String {
-        format!("http://{}", self.addr)
+        let scheme = if self.tls { "https" } else { "http" };
+        format!("{scheme}://{}", self.addr)
     }
 
     pub fn shutdown(mut self) {
-        if let Some(tx) = self.shutdown.take() {
-            let _ = tx.send(());
+        if let Some(handle) = self.handle.take() {
+            handle.graceful_shutdown(Some(Duration::from_secs(3)));
         }
         self.state.clear_bound_addr();
     }
 }
 
 pub async fn start_http(state: Arc<BridgeState>, config: ServerConfig) -> Result<HttpServer> {
+    // Install the ring CryptoProvider once. Required because axum-server is
+    // built with `tls-rustls-no-provider`; harmless if already installed.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let addr = SocketAddr::new(config.host, config.port);
     let app = router(state.clone());
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
+    let handle = Handle::new();
+    let tls_enabled = state.storage.settings().tls_enabled;
+
+    // Bind synchronously so we can surface "port in use" before returning.
+    let std_listener = std::net::TcpListener::bind(addr)
         .map_err(|e| BridgeError::Proxy(format!("bind {addr}: {e}")))?;
-    let bound = listener.local_addr().unwrap_or(addr);
+    std_listener
+        .set_nonblocking(true)
+        .map_err(|e| BridgeError::Proxy(format!("listener: {e}")))?;
+    let bound = std_listener.local_addr().unwrap_or(addr);
     state.set_bound_addr(bound);
 
-    let (tx, rx) = oneshot::channel::<()>();
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = rx.await;
-            })
-            .await
-        {
-            tracing::error!(target = "server", "http server failed: {e}");
-        }
-    });
+    if tls_enabled {
+        let tls_config = load_or_make_tls(&state).await?;
+        let handle2 = handle.clone();
+        let state2 = state.clone();
+        let make_service = app.into_make_service();
+        tokio::spawn(async move {
+            if let Err(e) = axum_server::from_tcp_rustls(std_listener, tls_config)
+                .handle(handle2)
+                .serve(make_service)
+                .await
+            {
+                tracing::error!(target = "server", "https server failed: {e}");
+            }
+            state2.clear_bound_addr();
+        });
+    } else {
+        let handle2 = handle.clone();
+        let state2 = state.clone();
+        let make_service = app.into_make_service();
+        tokio::spawn(async move {
+            if let Err(e) = axum_server::from_tcp(std_listener)
+                .handle(handle2)
+                .serve(make_service)
+                .await
+            {
+                tracing::error!(target = "server", "http server failed: {e}");
+            }
+            state2.clear_bound_addr();
+        });
+    }
 
     Ok(HttpServer {
         addr: bound,
-        shutdown: Some(tx),
+        tls: tls_enabled,
+        handle: Some(handle),
         state,
     })
+}
+
+/// Resolve the TLS config: use the configured cert/key pair if present,
+/// otherwise generate (and cache) a self-signed cert in the config dir.
+async fn load_or_make_tls(state: &Arc<BridgeState>) -> Result<RustlsConfig> {
+    let settings = state.storage.settings();
+    if let (Some(cert), Some(key)) = (settings.tls_cert_path.clone(), settings.tls_key_path.clone())
+    {
+        return RustlsConfig::from_pem_file(&cert, &key)
+            .await
+            .map_err(|e| BridgeError::Proxy(format!("load tls cert/key: {e}")));
+    }
+
+    let dir = state.storage.config_dir();
+    let cert_path = dir.join("tls-cert.pem");
+    let key_path = dir.join("tls-key.pem");
+    if !cert_path.exists() || !key_path.exists() {
+        let sans = vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+            "::1".to_string(),
+        ];
+        let generated =
+            rcgen::generate_simple_self_signed(sans).map_err(|e| BridgeError::Proxy(e.to_string()))?;
+        std::fs::write(&cert_path, generated.cert.pem())?;
+        std::fs::write(&key_path, generated.key_pair.serialize_pem())?;
+        tracing::info!(
+            target = "server",
+            "generated self-signed TLS cert at {}",
+            cert_path.display()
+        );
+    }
+    RustlsConfig::from_pem_file(&cert_path, &key_path)
+        .await
+        .map_err(|e| BridgeError::Proxy(format!("load self-signed cert: {e}")))
 }
 
 pub fn router(state: Arc<BridgeState>) -> Router {
