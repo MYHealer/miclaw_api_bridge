@@ -13,10 +13,15 @@ const patternRows = Array.from({ length: 8 }, (_, row) =>
 );
 
 const pageTitle = computed(() => {
+  if (route.path.includes("admin-login")) return "后台登录";
   if (route.path.includes("login")) return "小米账号";
   if (route.path.includes("logs")) return "代理日志";
+  if (route.path.includes("keys")) return "API 密钥";
+  if (route.path.includes("usage")) return "用量统计";
   return "本地代理";
 });
+
+const isAuthGate = computed(() => route.path.includes("admin-login"));
 
 function applyTheme(next: Theme) {
   theme.value = next;
@@ -49,9 +54,11 @@ watchEffect(() => {
         <span>miclaw_api_bridge</span>
       </RouterLink>
 
-      <nav class="topnav" aria-label="主导航">
+      <nav class="topnav" aria-label="主导航" v-if="!isAuthGate">
         <RouterLink to="/dashboard">Proxy</RouterLink>
         <RouterLink to="/login">Account</RouterLink>
+        <RouterLink to="/keys">Keys</RouterLink>
+        <RouterLink to="/usage">Usage</RouterLink>
         <RouterLink to="/logs">Logs</RouterLink>
       </nav>
 
