@@ -210,19 +210,14 @@ async fn run_server(
     tls_key: Option<String>,
 ) -> Result<()> {
     let state = BridgeState::new()?;
-    // CLI flags override persisted TLS settings for this run.
-    let want_tls = tls || tls_cert.is_some() || tls_key.is_some();
-    if want_tls {
-        state.storage.update_settings(|s| {
-            s.tls_enabled = true;
-            if tls_cert.is_some() {
-                s.tls_cert_path = tls_cert.clone();
-            }
-            if tls_key.is_some() {
-                s.tls_key_path = tls_key.clone();
-            }
-        })?;
-    }
+    // TLS is flag-authoritative: each `server` run sets the persisted TLS state
+    // from the CLI flags, so `--tls` enables it and a plain run disables it.
+    // On OpenWrt the init script passes these flags based on the `tls` UCI option.
+    state.storage.update_settings(|s| {
+        s.tls_enabled = tls || tls_cert.is_some() || tls_key.is_some();
+        s.tls_cert_path = tls_cert.clone();
+        s.tls_key_path = tls_key.clone();
+    })?;
     let port = port.unwrap_or_else(|| state.storage.settings().proxy_port);
     let server = start_http(state, ServerConfig { host, port }).await?;
     println!(
