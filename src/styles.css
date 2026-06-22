@@ -788,3 +788,7 @@ select:focus {
     margin-top: 10px;
   }
 }
+
+a {
+  color: var(--ink);
+}

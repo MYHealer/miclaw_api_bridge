@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { api, UsageReport } from "../api";
 
 const WINDOWS = ["1h", "1d", "7d", "30d"] as const;
@@ -41,13 +41,29 @@ const maxBucket = computed(() => {
 });
 
 const CHART_H = 160;
-const BAR_W = 14;
-const GAP = 4;
+const AXIS_H = 24;
+const BAR_FILL = 0.62; // bar width as a fraction of its slot
 
-const chartWidth = computed(() => {
-  const n = report.value?.buckets.length ?? 0;
-  return n * (BAR_W + GAP) + GAP;
-});
+// The chart fills the full content width of its (padded) container; we measure
+// that width with a ResizeObserver and lay bars out evenly across it.
+const chartWrap = ref<HTMLElement | null>(null);
+const containerW = ref(0);
+let ro: ResizeObserver | null = null;
+
+const bucketCount = computed(() => report.value?.buckets.length ?? 0);
+const chartWidth = computed(() => Math.max(containerW.value, 1));
+const slotW = computed(() =>
+  bucketCount.value > 0 ? chartWidth.value / bucketCount.value : 0,
+);
+const barW = computed(() => Math.max(slotW.value * BAR_FILL, 1));
+
+function measure() {
+  const el = chartWrap.value;
+  if (!el) return;
+  const cs = getComputedStyle(el);
+  const pad = parseFloat(cs.paddingLeft || "0") + parseFloat(cs.paddingRight || "0");
+  containerW.value = Math.max(0, el.clientWidth - pad);
+}
 
 interface Seg {
   model: string;
@@ -76,7 +92,7 @@ function segmentsFor(bucketIndex: number): Seg[] {
 }
 
 function barX(i: number): number {
-  return GAP + i * (BAR_W + GAP);
+  return i * slotW.value + (slotW.value - barW.value) / 2;
 }
 
 function labelFor(b: { t: number }): string {
@@ -116,7 +132,17 @@ function fmtNum(n: number): string {
   return String(n);
 }
 
-onMounted(load);
+onMounted(() => {
+  load();
+  measure();
+  ro = new ResizeObserver(() => measure());
+  if (chartWrap.value) ro.observe(chartWrap.value);
+});
+
+onBeforeUnmount(() => {
+  ro?.disconnect();
+  ro = null;
+});
 </script>
 
 <template>
@@ -143,10 +169,11 @@ onMounted(load);
       <span class="grand">合计 {{ fmtNum(report?.grand_total ?? 0) }} tokens</span>
     </div>
 
-    <div v-if="report && maxBucket > 0" class="chart-wrap">
+    <div class="chart-wrap" ref="chartWrap">
       <svg
+        v-if="report && maxBucket > 0 && containerW > 0"
         class="bars"
-        :viewBox="`0 0 ${chartWidth} ${CHART_H + 24}`"
+        :viewBox="`0 0 ${chartWidth} ${CHART_H + AXIS_H}`"
         preserveAspectRatio="none"
         role="img"
         aria-label="token 用量柱状图"
@@ -157,16 +184,15 @@ onMounted(load);
             :key="si"
             :x="barX(i)"
             :y="s.y"
-            :width="BAR_W"
+            :width="barW"
             :height="Math.max(s.h, s.value > 0 ? 1 : 0)"
             :fill="s.color"
-            rx="1"
           >
             <title>{{ labelFor(b) }} · {{ s.model }}: {{ s.value }}</title>
           </rect>
           <text
             v-if="i % labelEvery === 0"
-            :x="barX(i) + BAR_W / 2"
+            :x="barX(i) + barW / 2"
             :y="CHART_H + 16"
             text-anchor="middle"
             class="axis-label"
@@ -175,9 +201,9 @@ onMounted(load);
           </text>
         </g>
       </svg>
+      <p v-else-if="report" class="notice">该时间段内还没有用量记录。</p>
+      <p v-else class="notice">加载中…</p>
     </div>
-    <p v-else-if="report" class="notice">该时间段内还没有用量记录。</p>
-    <p v-else-if="loading" class="notice">加载中…</p>
 
     <div v-if="models.length" class="legend">
       <span v-for="m in models" :key="m" class="legend-item">
@@ -192,22 +218,29 @@ onMounted(load);
 .seg-tabs {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  margin-bottom: 1rem;
+  padding: 0 32px 32px 120px;
 }
 .seg-tab {
-  padding: 0.3rem 0.9rem;
-  border: 1px solid var(--hairline, rgba(128, 128, 128, 0.3));
+  padding: 0.8rem 1.5rem;
+  border-top: 1px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+  border-left: 0;
+  border-right: 0;
   background: transparent;
-  color: inherit;
-  border-radius: 6px;
+  color: var(--ink);
   cursor: pointer;
   font: inherit;
+  font-weight: 700;
+}
+.seg-tab:first-of-type {
+  border-left: 1px solid var(--ink);
+}
+.seg-tab:last-of-type {
+  border-right: 1px solid var(--ink);
 }
 .seg-tab.active {
-  background: var(--accent, #e23744);
-  color: #fff;
-  border-color: transparent;
+  background: var(--ink);
+  color: var(--bg);
 }
 .seg-tabs .grand {
   margin-left: auto;
@@ -216,15 +249,15 @@ onMounted(load);
 }
 .chart-wrap {
   width: 100%;
-  overflow-x: auto;
+  padding: 0 32px 32px 120px;
 }
 .bars {
-  width: 100%;
-  height: 200px;
   display: block;
+  width: 100%;
+  height: 184px;
 }
 .axis-label {
-  font-size: 7px;
+  font-size: 9px;
   fill: currentColor;
   opacity: 0.55;
 }
@@ -232,7 +265,7 @@ onMounted(load);
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem 1.1rem;
-  margin-top: 1rem;
+  padding: 0 32px 32px 120px;
   font-size: 0.85em;
 }
 .legend-item {

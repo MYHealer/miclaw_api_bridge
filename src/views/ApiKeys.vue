@@ -152,6 +152,7 @@ onMounted(load);
 <style scoped>
 .secret-reveal {
   margin-top: 1rem;
+  padding: 0 32px 32px 120px;
 }
 .secret-row {
   display: flex;
