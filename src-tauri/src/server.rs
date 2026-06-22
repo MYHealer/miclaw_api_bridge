@@ -177,7 +177,7 @@ pub fn router(state: Arc<BridgeState>) -> Router {
         .route("/api/admin/password", post(api_admin_password))
         // api keys for /v1
         .route("/api/keys", get(api_keys_list).post(api_keys_create))
-        .route("/api/keys/{id}", axum::routing::delete(api_keys_delete))
+        .route("/api/keys/:id", axum::routing::delete(api_keys_delete))
         .route(
             "/api/settings/api-key-required",
             get(api_key_required_get).post(api_key_required_set),
