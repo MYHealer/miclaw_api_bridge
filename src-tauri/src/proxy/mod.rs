@@ -15,14 +15,20 @@ use std::sync::Arc;
 pub struct ProxyController {
     pub mimo: Arc<MimoClient>,
     pub emitter: LogEmitter,
+    pub usage: Arc<crate::usage::UsageStore>,
     verbose: AtomicBool,
 }
 
 impl ProxyController {
-    pub fn new(mimo: Arc<MimoClient>, emitter: LogEmitter) -> Self {
+    pub fn new(
+        mimo: Arc<MimoClient>,
+        emitter: LogEmitter,
+        usage: Arc<crate::usage::UsageStore>,
+    ) -> Self {
         Self {
             mimo,
             emitter,
+            usage,
             verbose: AtomicBool::new(false),
         }
     }

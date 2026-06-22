@@ -21,6 +21,21 @@ pub struct Storage {
 pub struct Settings {
     #[serde(default = "default_port")]
     pub proxy_port: u16,
+    /// Serve the WebUI + proxy over HTTPS (self-signed cert is auto-generated
+    /// when no custom cert/key is configured).
+    #[serde(default)]
+    pub tls_enabled: bool,
+    /// Optional custom TLS certificate chain (PEM). Falls back to a generated
+    /// self-signed cert when empty.
+    #[serde(default)]
+    pub tls_cert_path: Option<String>,
+    /// Optional custom TLS private key (PEM).
+    #[serde(default)]
+    pub tls_key_path: Option<String>,
+    /// Require a valid API key (Authorization: Bearer …) on /v1 endpoints.
+    /// Off by default so existing "any key works" setups keep working.
+    #[serde(default)]
+    pub api_key_required: bool,
 }
 
 fn default_port() -> u16 {
@@ -31,6 +46,10 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             proxy_port: default_port(),
+            tls_enabled: false,
+            tls_cert_path: None,
+            tls_key_path: None,
+            api_key_required: false,
         }
     }
 }
@@ -74,6 +93,12 @@ impl Storage {
 
     pub fn settings(&self) -> Settings {
         self.settings.read().clone()
+    }
+
+    /// Directory holding `settings.json`; also where the auto-generated
+    /// self-signed TLS cert/key are written.
+    pub fn config_dir(&self) -> &std::path::Path {
+        &self.config_dir
     }
 
     pub fn update_settings<F: FnOnce(&mut Settings)>(&self, f: F) -> Result<Settings> {
