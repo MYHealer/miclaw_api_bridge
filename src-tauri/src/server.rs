@@ -167,6 +167,18 @@ pub fn router(state: Arc<BridgeState>) -> Router {
             get(api_logs_verbose_get).post(api_logs_verbose_set),
         )
         .route("/api/logs/stream", get(api_logs_stream))
+        // admin auth (control-plane password)
+        .route("/api/admin/session", get(api_admin_session))
+        .route("/api/admin/setup", post(api_admin_setup))
+        .route("/api/admin/login", post(api_admin_login))
+        .route("/api/admin/logout", post(api_admin_logout))
+        .route("/api/admin/password", post(api_admin_password))
+        // everything under /api requires a valid admin session once configured
+        // (the guard whitelists session/setup/login itself)
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            admin_guard,
+        ))
         .with_state(state.clone());
 
     let proxy = Router::new()
@@ -181,6 +193,137 @@ pub fn router(state: Arc<BridgeState>) -> Router {
         .merge(proxy)
         .fallback(static_asset)
         .layer(CorsLayer::permissive())
+}
+
+/// Endpoints reachable without an admin session (so the login UI can work).
+fn admin_open_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/admin/session" | "/api/admin/setup" | "/api/admin/login"
+    )
+}
+
+fn session_cookie(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    raw.split(';').find_map(|kv| {
+        let kv = kv.trim();
+        let (k, v) = kv.split_once('=')?;
+        if k == "mb_session" {
+            Some(v.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// Guard `/api/*`: once an admin password is configured, every endpoint except
+/// the auth ones requires a valid `mb_session` cookie.
+async fn admin_guard(
+    State(state): State<Arc<BridgeState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = req.uri().path();
+    if admin_open_path(path) || !state.security.is_configured() {
+        return next.run(req).await;
+    }
+    if let Some(token) = session_cookie(req.headers()) {
+        if state.security.validate_session(&token) {
+            return next.run(req).await;
+        }
+    }
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"error": {"message": "admin authentication required"}})),
+    )
+        .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct PasswordReq {
+    password: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ChangePasswordReq {
+    old_password: String,
+    new_password: String,
+}
+
+async fn api_admin_session(State(state): State<Arc<BridgeState>>, headers: HeaderMap) -> Response {
+    let configured = state.security.is_configured();
+    let authenticated = !configured
+        || session_cookie(&headers)
+            .map(|t| state.security.validate_session(&t))
+            .unwrap_or(false);
+    Json(json!({ "configured": configured, "authenticated": authenticated })).into_response()
+}
+
+async fn api_admin_setup(
+    State(state): State<Arc<BridgeState>>,
+    Json(req): Json<PasswordReq>,
+) -> Response {
+    match state.security.setup(&req.password) {
+        Ok(()) => match state.security.login(&req.password) {
+            Ok(token) => login_response(&state, token),
+            Err(e) => error_response(e),
+        },
+        Err(e) => error_response(e),
+    }
+}
+
+async fn api_admin_login(
+    State(state): State<Arc<BridgeState>>,
+    Json(req): Json<PasswordReq>,
+) -> Response {
+    match state.security.login(&req.password) {
+        Ok(token) => login_response(&state, token),
+        Err(e) => error_response(e),
+    }
+}
+
+async fn api_admin_logout(State(state): State<Arc<BridgeState>>, headers: HeaderMap) -> Response {
+    if let Some(token) = session_cookie(&headers) {
+        state.security.revoke_session(&token);
+    }
+    let mut resp = Json(json!({"ok": true})).into_response();
+    let cleared = "mb_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0";
+    if let Ok(v) = HeaderValue::from_str(cleared) {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    resp
+}
+
+async fn api_admin_password(
+    State(state): State<Arc<BridgeState>>,
+    Json(req): Json<ChangePasswordReq>,
+) -> Response {
+    match state
+        .security
+        .change_password(&req.old_password, &req.new_password)
+    {
+        Ok(()) => match state.security.login(&req.new_password) {
+            Ok(token) => login_response(&state, token),
+            Err(e) => error_response(e),
+        },
+        Err(e) => error_response(e),
+    }
+}
+
+/// Build a JSON `{ok:true}` response that also sets the session cookie.
+fn login_response(state: &Arc<BridgeState>, token: String) -> Response {
+    let secure = if state.storage.settings().tls_enabled {
+        "; Secure"
+    } else {
+        ""
+    };
+    let cookie =
+        format!("mb_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800{secure}");
+    let mut resp = Json(json!({"ok": true})).into_response();
+    if let Ok(v) = HeaderValue::from_str(&cookie) {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    resp
 }
 
 async fn api_auth_status(State(state): State<Arc<BridgeState>>) -> Response {
