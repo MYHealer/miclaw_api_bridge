@@ -1,4 +1,4 @@
-use super::transport::{emit_log, forward, list_models, map_err, proxy_response};
+use super::transport::{emit_log, forward, list_models, map_err, proxy_response, proxy_response_tapped};
 use super::ProxyController;
 use axum::{
     body::Body,
@@ -91,7 +91,12 @@ async fn responses_passthrough_or_compat(ctrl: Arc<ProxyController>, body: Value
                     "elapsed_ms": started.elapsed().as_millis() as u64,
                 }),
             );
-            proxy_response(upstream).await
+            let model = body
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            proxy_response_tapped(ctrl, model, upstream).await
         }
         Err(e) => {
             emit_log(
@@ -139,7 +144,7 @@ async fn responses_compat(ctrl: Arc<ProxyController>, body: Value) -> Response {
                     "elapsed_ms": started.elapsed().as_millis() as u64,
                 }),
             );
-            responses_stream_from_chat(upstream, body).await
+            responses_stream_from_chat(ctrl.clone(), upstream, body).await
         }
         Ok(upstream) if upstream.status().is_success() => {
             let status = upstream.status();
@@ -155,6 +160,10 @@ async fn responses_compat(ctrl: Arc<ProxyController>, body: Value) -> Response {
                             "elapsed_ms": started.elapsed().as_millis() as u64,
                         }),
                     );
+                    if let Some((p, c, t)) = crate::usage::usage_from_value(&chat) {
+                        let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
+                        ctrl.usage.record(model, p, c, t);
+                    }
                     Json(response_from_chat(&body, &chat)).into_response()
                 }
                 Err(e) => map_err(crate::error::BridgeError::from(e)),
@@ -466,7 +475,11 @@ fn usage_from_chat(usage: Option<&Value>, reasoning: &str) -> Value {
     })
 }
 
-async fn responses_stream_from_chat(upstream: reqwest::Response, request: Value) -> Response {
+async fn responses_stream_from_chat(
+    ctrl: Arc<ProxyController>,
+    upstream: reqwest::Response,
+    request: Value,
+) -> Response {
     let response_id = new_response_id("resp");
     let msg_id = new_response_id("msg");
     let created_at = chrono::Utc::now().timestamp();
@@ -474,6 +487,7 @@ async fn responses_stream_from_chat(upstream: reqwest::Response, request: Value)
         .get("model")
         .cloned()
         .unwrap_or_else(|| json!(crate::mimo::MODEL_DEFAULT));
+    let usage_model = model.as_str().unwrap_or(crate::mimo::MODEL_DEFAULT).to_string();
 
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(32);
     tokio::spawn(async move {
@@ -621,6 +635,9 @@ async fn responses_stream_from_chat(upstream: reqwest::Response, request: Value)
 
         if usage.is_null() {
             usage = usage_from_chat(None, &reasoning);
+        }
+        if let Some((p, c, t)) = crate::usage::usage_from_value(&json!({ "usage": usage.clone() })) {
+            ctrl.usage.record(&usage_model, p, c, t);
         }
         send_event(
             &tx,

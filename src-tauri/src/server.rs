@@ -180,6 +180,7 @@ pub fn router(state: Arc<BridgeState>) -> Router {
             "/api/settings/api-key-required",
             get(api_key_required_get).post(api_key_required_set),
         )
+        .route("/api/usage", get(api_usage))
         // everything under /api requires a valid admin session once configured
         // (the guard whitelists session/setup/login itself)
         .route_layer(axum::middleware::from_fn_with_state(
@@ -425,6 +426,20 @@ async fn api_key_required_set(
         Ok(_) => Json(json!({ "required": req.required })).into_response(),
         Err(e) => error_response(e),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct UsageQuery {
+    #[serde(default)]
+    window: Option<String>,
+}
+
+async fn api_usage(
+    State(state): State<Arc<BridgeState>>,
+    axum::extract::Query(q): axum::extract::Query<UsageQuery>,
+) -> Response {
+    let window = q.window.as_deref().unwrap_or("1d");
+    Json(state.usage.query(window)).into_response()
 }
 
 async fn api_auth_status(State(state): State<Arc<BridgeState>>) -> Response {

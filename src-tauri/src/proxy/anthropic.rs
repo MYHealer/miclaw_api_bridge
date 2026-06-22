@@ -86,9 +86,9 @@ pub async fn messages(
                 return (status, text).into_response();
             }
             if stream_requested {
-                stream_anthropic(upstream, model)
+                stream_anthropic(upstream, model, ctrl.usage.clone())
             } else {
-                aggregate_anthropic(upstream, model).await
+                aggregate_anthropic(upstream, model, ctrl.usage.clone()).await
             }
         }
         Err(e) => {
@@ -267,8 +267,12 @@ fn anthropic_to_openai_chat(body: &Value) -> std::result::Result<Value, String> 
     Ok(Value::Object(out))
 }
 
-fn stream_anthropic(upstream: reqwest::Response, model: String) -> Response {
-    let stream = SseTranslator::new(upstream.bytes_stream().boxed(), model);
+fn stream_anthropic(
+    upstream: reqwest::Response,
+    model: String,
+    usage: Arc<crate::usage::UsageStore>,
+) -> Response {
+    let stream = SseTranslator::new(upstream.bytes_stream().boxed(), model, usage);
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
@@ -277,7 +281,11 @@ fn stream_anthropic(upstream: reqwest::Response, model: String) -> Response {
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-async fn aggregate_anthropic(upstream: reqwest::Response, model: String) -> Response {
+async fn aggregate_anthropic(
+    upstream: reqwest::Response,
+    model: String,
+    usage: Arc<crate::usage::UsageStore>,
+) -> Response {
     // Even when stream=false, mimo may still respond with SSE; collect chunks.
     let body_text = upstream.text().await.unwrap_or_default();
     let mut text = String::new();
@@ -365,6 +373,12 @@ async fn aggregate_anthropic(upstream: reqwest::Response, model: String) -> Resp
     }
     content.extend(tool_uses);
 
+    usage.record(
+        &model,
+        input_tokens as i64,
+        output_tokens as i64,
+        (input_tokens + output_tokens) as i64,
+    );
     let payload = json!({
         "id": format!("msg_{}", Uuid::new_v4().simple()),
         "type": "message",
@@ -414,6 +428,7 @@ struct SseTranslator {
     inner: futures::stream::BoxStream<'static, std::result::Result<Bytes, reqwest::Error>>,
     buf: String,
     model: String,
+    usage: Arc<crate::usage::UsageStore>,
     state: TranslatorState,
 }
 
@@ -453,11 +468,13 @@ impl SseTranslator {
     fn new(
         inner: futures::stream::BoxStream<'static, std::result::Result<Bytes, reqwest::Error>>,
         model: String,
+        usage: Arc<crate::usage::UsageStore>,
     ) -> Self {
         Self {
             inner,
             buf: String::new(),
             model,
+            usage,
             state: TranslatorState::default(),
         }
     }
@@ -750,6 +767,12 @@ impl SseTranslator {
         });
         out.push(format_sse("message_delta", &evt));
         out.push(format_sse("message_stop", &json!({"type": "message_stop"})));
+        self.usage.record(
+            &self.model,
+            self.state.input_tokens as i64,
+            self.state.output_tokens as i64,
+            (self.state.input_tokens + self.state.output_tokens) as i64,
+        );
         self.state.finished = true;
     }
 }
@@ -808,12 +831,17 @@ mod tests {
         // The Stream impl drives via `pop_event` over a buffer of bytes;
         // for a unit test we exercise `translate` and `finish` directly.
         let inner = futures::stream::empty().boxed();
-        let mut t = SseTranslator::new(inner, model);
+        let dir = std::env::temp_dir().join(format!("mb-anthropic-{}", std::process::id()));
+        let storage =
+            crate::storage::Storage::for_paths(dir.join("c"), dir.join("d")).unwrap();
+        let usage = crate::usage::UsageStore::load(storage);
+        let mut t = SseTranslator::new(inner, model, usage);
         let mut out: Vec<String> = Vec::new();
         for c in chunks {
             out.extend(t.translate(&c.to_string()));
         }
         t.finish(&mut out);
+        let _ = std::fs::remove_dir_all(&dir);
         out.concat()
     }
 

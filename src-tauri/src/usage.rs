@@ -229,3 +229,57 @@ impl UsageScanner {
         self.last
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scanner_parses_openai_json_usage() {
+        let mut s = UsageScanner::new(false);
+        s.feed(br#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#);
+        assert_eq!(s.finish(), Some((10, 5, 15)));
+    }
+
+    #[test]
+    fn scanner_parses_sse_trailing_usage() {
+        let mut s = UsageScanner::new(true);
+        // streamed in arbitrary chunks; usage arrives in the final data packet
+        s.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n");
+        s.feed(b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,");
+        s.feed(b"\"completion_tokens\":7,\"total_tokens\":10}}\n\ndata: [DONE]\n\n");
+        assert_eq!(s.finish(), Some((3, 7, 10)));
+    }
+
+    #[test]
+    fn usage_from_value_handles_anthropic_and_responses() {
+        let anthropic = serde_json::json!({"usage": {"input_tokens": 4, "output_tokens": 6}});
+        assert_eq!(usage_from_value(&anthropic), Some((4, 6, 10)));
+        let responses =
+            serde_json::json!({"usage": {"input_tokens": 4, "output_tokens": 6, "total_tokens": 12}});
+        assert_eq!(usage_from_value(&responses), Some((4, 6, 12)));
+    }
+
+    #[test]
+    fn store_buckets_window_counts_and_totals() {
+        let dir = std::env::temp_dir().join(format!("mb-usage-{}", std::process::id()));
+        let cfg = dir.join("c");
+        let data = dir.join("d");
+        let storage = crate::storage::Storage::for_paths(cfg, data).unwrap();
+        let store = UsageStore::load(storage);
+        store.record("xiaomi/mimo", 10, 20, 30);
+        store.record("xiaomi/mimo", 1, 2, 3);
+        store.record("xiaomi/mimo-pro", 5, 5, 10);
+
+        let v = store.query("1d");
+        assert_eq!(v["bucket_seconds"], 3600);
+        assert_eq!(v["buckets"].as_array().unwrap().len(), 24);
+        assert_eq!(v["grand_total"], 43);
+        assert_eq!(v["model_totals"]["xiaomi/mimo"], 33);
+        assert_eq!(v["model_totals"]["xiaomi/mimo-pro"], 10);
+
+        let h = store.query("1h");
+        assert_eq!(h["buckets"].as_array().unwrap().len(), 12);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

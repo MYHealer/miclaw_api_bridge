@@ -6,6 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -87,8 +88,15 @@ pub async fn forward(ctrl: Arc<ProxyController>, upstream_path: &str, body: Valu
             let status = upstream.status();
             tracing::debug!(target = "proxy", "← mimo {upstream_path} status={status}");
             if ctrl.verbose() {
-                return buffered_response_with_log(&ctrl, upstream_path, status, started, upstream)
-                    .await;
+                return buffered_response_with_log(
+                    &ctrl,
+                    upstream_path,
+                    &model,
+                    status,
+                    started,
+                    upstream,
+                )
+                .await;
             }
             emit_log(
                 &ctrl,
@@ -100,7 +108,7 @@ pub async fn forward(ctrl: Arc<ProxyController>, upstream_path: &str, body: Valu
                     "elapsed_ms": started.elapsed().as_millis() as u64,
                 }),
             );
-            proxy_response(upstream).await
+            proxy_response_tapped(ctrl.clone(), model.clone(), upstream).await
         }
         Err(e) => {
             tracing::warn!(target = "proxy", "mimo {upstream_path} error: {e}");
@@ -125,12 +133,24 @@ pub async fn forward(ctrl: Arc<ProxyController>, upstream_path: &str, body: Valu
 async fn buffered_response_with_log(
     ctrl: &ProxyController,
     path: &str,
+    model: &str,
     status: reqwest::StatusCode,
     started: std::time::Instant,
     upstream: reqwest::Response,
 ) -> Response {
     let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
+    let is_sse = content_type
+        .as_ref()
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("event-stream"))
+        .unwrap_or(false);
     let bytes = upstream.bytes().await.unwrap_or_default();
+    // Record token usage from the buffered body (handles JSON and SSE).
+    let mut scanner = crate::usage::UsageScanner::new(is_sse);
+    scanner.feed(&bytes);
+    if let Some((p, c, t)) = scanner.finish() {
+        ctrl.usage.record(model, p, c, t);
+    }
     let text = String::from_utf8_lossy(&bytes).to_string();
     let body_val = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
     emit_log(
@@ -179,6 +199,74 @@ pub async fn proxy_response(upstream: reqwest::Response) -> Response {
     let stream = upstream.bytes_stream();
     let body = Body::from_stream(stream);
     let mut resp = Response::new(body);
+    *resp.status_mut() = status;
+    *resp.headers_mut() = headers;
+    resp
+}
+
+/// Like `proxy_response`, but taps the streamed body to extract the final
+/// `usage` token counts and records them against `model` when the stream ends.
+/// Bytes are forwarded to the client unchanged and without extra buffering.
+pub async fn proxy_response_tapped(
+    ctrl: Arc<ProxyController>,
+    model: String,
+    upstream: reqwest::Response,
+) -> Response {
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
+    let is_sse = content_type
+        .as_ref()
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("event-stream"))
+        .unwrap_or(false);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        content_type.unwrap_or_else(|| header::HeaderValue::from_static("application/json")),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
+
+    let scanner = crate::usage::UsageScanner::new(is_sse);
+    let upstream_stream = upstream.bytes_stream();
+    let body_stream = futures_util::stream::unfold(
+        (upstream_stream, Some(scanner), ctrl, model),
+        |(mut stream, mut scanner, ctrl, model)| async move {
+            match stream.next().await {
+                Some(Ok(bytes)) => {
+                    if let Some(s) = scanner.as_mut() {
+                        s.feed(&bytes);
+                    }
+                    Some((Ok::<_, std::io::Error>(bytes), (stream, scanner, ctrl, model)))
+                }
+                Some(Err(e)) => {
+                    if let Some(s) = scanner.take() {
+                        if let Some((p, c, t)) = s.finish() {
+                            ctrl.usage.record(&model, p, c, t);
+                        }
+                    }
+                    Some((
+                        Err(std::io::Error::other(e)),
+                        (stream, scanner, ctrl, model),
+                    ))
+                }
+                None => {
+                    if let Some(s) = scanner.take() {
+                        if let Some((p, c, t)) = s.finish() {
+                            ctrl.usage.record(&model, p, c, t);
+                        }
+                    }
+                    None
+                }
+            }
+        },
+    );
+
+    let mut resp = Response::new(Body::from_stream(body_stream));
     *resp.status_mut() = status;
     *resp.headers_mut() = headers;
     resp
