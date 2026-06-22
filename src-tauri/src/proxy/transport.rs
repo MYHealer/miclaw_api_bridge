@@ -241,7 +241,10 @@ pub async fn proxy_response_tapped(
                     if let Some(s) = scanner.as_mut() {
                         s.feed(&bytes);
                     }
-                    Some((Ok::<_, std::io::Error>(bytes), (stream, scanner, ctrl, model)))
+                    Some((
+                        Ok::<_, std::io::Error>(bytes),
+                        (stream, scanner, ctrl, model),
+                    ))
                 }
                 Some(Err(e)) => {
                     if let Some(s) = scanner.take() {

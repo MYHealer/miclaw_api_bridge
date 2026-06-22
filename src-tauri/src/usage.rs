@@ -63,7 +63,11 @@ impl UsageStore {
                 },
                 prompt,
                 completion,
-                total: if total > 0 { total } else { prompt + completion },
+                total: if total > 0 {
+                    total
+                } else {
+                    prompt + completion
+                },
             });
             let cutoff = now_ms() - RETAIN_MS;
             events.retain(|e| e.ts >= cutoff);
@@ -80,10 +84,10 @@ impl UsageStore {
     /// Bucket usage for a window. `window` ∈ {"1h","1d","7d","30d"}.
     pub fn query(&self, window: &str) -> Value {
         let (range_ms, bucket_ms) = match window {
-            "1h" => (3_600_000i64, 300_000i64),  // 12 × 5 min
-            "7d" => (604_800_000, 86_400_000),   // 7 × 1 day
+            "1h" => (3_600_000i64, 300_000i64),   // 12 × 5 min
+            "7d" => (604_800_000, 86_400_000),    // 7 × 1 day
             "30d" => (2_592_000_000, 86_400_000), // 30 × 1 day
-            _ => (86_400_000, 3_600_000),        // 1d: 24 × 1 hour
+            _ => (86_400_000, 3_600_000),         // 1d: 24 × 1 hour
         };
         let now = now_ms();
         let start = now - range_ms;
@@ -147,7 +151,9 @@ pub fn usage_from_value(v: &Value) -> Option<(i64, i64, i64)> {
     // OpenAI chat:      prompt_tokens / completion_tokens / total_tokens
     // OpenAI responses: input_tokens  / output_tokens     / total_tokens
     // Anthropic:        input_tokens  / output_tokens
-    let prompt = get("prompt_tokens").or_else(|| get("input_tokens")).unwrap_or(0);
+    let prompt = get("prompt_tokens")
+        .or_else(|| get("input_tokens"))
+        .unwrap_or(0);
     let completion = get("completion_tokens")
         .or_else(|| get("output_tokens"))
         .unwrap_or(0);
@@ -255,8 +261,7 @@ mod tests {
     fn usage_from_value_handles_anthropic_and_responses() {
         let anthropic = serde_json::json!({"usage": {"input_tokens": 4, "output_tokens": 6}});
         assert_eq!(usage_from_value(&anthropic), Some((4, 6, 10)));
-        let responses =
-            serde_json::json!({"usage": {"input_tokens": 4, "output_tokens": 6, "total_tokens": 12}});
+        let responses = serde_json::json!({"usage": {"input_tokens": 4, "output_tokens": 6, "total_tokens": 12}});
         assert_eq!(usage_from_value(&responses), Some((4, 6, 12)));
     }
 

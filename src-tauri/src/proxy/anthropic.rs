@@ -832,8 +832,7 @@ mod tests {
         // for a unit test we exercise `translate` and `finish` directly.
         let inner = futures::stream::empty().boxed();
         let dir = std::env::temp_dir().join(format!("mb-anthropic-{}", std::process::id()));
-        let storage =
-            crate::storage::Storage::for_paths(dir.join("c"), dir.join("d")).unwrap();
+        let storage = crate::storage::Storage::for_paths(dir.join("c"), dir.join("d")).unwrap();
         let usage = crate::usage::UsageStore::load(storage);
         let mut t = SseTranslator::new(inner, model, usage);
         let mut out: Vec<String> = Vec::new();

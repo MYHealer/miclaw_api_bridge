@@ -1,4 +1,6 @@
-use super::transport::{emit_log, forward, list_models, map_err, proxy_response, proxy_response_tapped};
+use super::transport::{
+    emit_log, forward, list_models, map_err, proxy_response, proxy_response_tapped,
+};
 use super::ProxyController;
 use axum::{
     body::Body,
@@ -487,7 +489,10 @@ async fn responses_stream_from_chat(
         .get("model")
         .cloned()
         .unwrap_or_else(|| json!(crate::mimo::MODEL_DEFAULT));
-    let usage_model = model.as_str().unwrap_or(crate::mimo::MODEL_DEFAULT).to_string();
+    let usage_model = model
+        .as_str()
+        .unwrap_or(crate::mimo::MODEL_DEFAULT)
+        .to_string();
 
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(32);
     tokio::spawn(async move {
@@ -636,7 +641,8 @@ async fn responses_stream_from_chat(
         if usage.is_null() {
             usage = usage_from_chat(None, &reasoning);
         }
-        if let Some((p, c, t)) = crate::usage::usage_from_value(&json!({ "usage": usage.clone() })) {
+        if let Some((p, c, t)) = crate::usage::usage_from_value(&json!({ "usage": usage.clone() }))
+        {
             ctrl.usage.record(&usage_model, p, c, t);
         }
         send_event(

@@ -119,8 +119,10 @@ pub async fn start_http(state: Arc<BridgeState>, config: ServerConfig) -> Result
 /// otherwise generate (and cache) a self-signed cert in the config dir.
 async fn load_or_make_tls(state: &Arc<BridgeState>) -> Result<RustlsConfig> {
     let settings = state.storage.settings();
-    if let (Some(cert), Some(key)) = (settings.tls_cert_path.clone(), settings.tls_key_path.clone())
-    {
+    if let (Some(cert), Some(key)) = (
+        settings.tls_cert_path.clone(),
+        settings.tls_key_path.clone(),
+    ) {
         return RustlsConfig::from_pem_file(&cert, &key)
             .await
             .map_err(|e| BridgeError::Proxy(format!("load tls cert/key: {e}")));
@@ -135,8 +137,8 @@ async fn load_or_make_tls(state: &Arc<BridgeState>) -> Result<RustlsConfig> {
             "127.0.0.1".to_string(),
             "::1".to_string(),
         ];
-        let generated =
-            rcgen::generate_simple_self_signed(sans).map_err(|e| BridgeError::Proxy(e.to_string()))?;
+        let generated = rcgen::generate_simple_self_signed(sans)
+            .map_err(|e| BridgeError::Proxy(e.to_string()))?;
         std::fs::write(&cert_path, generated.cert.pem())?;
         std::fs::write(&key_path, generated.key_pair.serialize_pem())?;
         tracing::info!(
