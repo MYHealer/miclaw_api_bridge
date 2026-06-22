@@ -173,6 +173,13 @@ pub fn router(state: Arc<BridgeState>) -> Router {
         .route("/api/admin/login", post(api_admin_login))
         .route("/api/admin/logout", post(api_admin_logout))
         .route("/api/admin/password", post(api_admin_password))
+        // api keys for /v1
+        .route("/api/keys", get(api_keys_list).post(api_keys_create))
+        .route("/api/keys/{id}", axum::routing::delete(api_keys_delete))
+        .route(
+            "/api/settings/api-key-required",
+            get(api_key_required_get).post(api_key_required_set),
+        )
         // everything under /api requires a valid admin session once configured
         // (the guard whitelists session/setup/login itself)
         .route_layer(axum::middleware::from_fn_with_state(
@@ -186,6 +193,10 @@ pub fn router(state: Arc<BridgeState>) -> Router {
         .route("/v1/chat/completions", post(crate::proxy::openai::chat))
         .route("/v1/responses", post(crate::proxy::openai::responses))
         .route("/v1/messages", post(crate::proxy::anthropic::messages))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            api_key_guard,
+        ))
         .with_state(state.proxy.clone());
 
     Router::new()
@@ -324,6 +335,96 @@ fn login_response(state: &Arc<BridgeState>, token: String) -> Response {
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }
     resp
+}
+
+// ---- API keys ---------------------------------------------------------------
+
+/// Enforce API keys on `/v1/*` when `api_key_required` is on. When off, any
+/// (or no) key works, preserving the original drop-in behavior.
+async fn api_key_guard(
+    State(state): State<Arc<BridgeState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if !state.storage.settings().api_key_required {
+        return next.run(req).await;
+    }
+    let ok = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| {
+            s.strip_prefix("Bearer ")
+                .or_else(|| s.strip_prefix("bearer "))
+        })
+        .map(|key| state.security.verify_key(key.trim()))
+        .unwrap_or(false);
+    if ok {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "invalid or missing API key",
+                }
+            })),
+        )
+            .into_response()
+    }
+}
+
+async fn api_keys_list(State(state): State<Arc<BridgeState>>) -> Response {
+    Json(state.security.list_keys()).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct CreateKeyReq {
+    #[serde(default)]
+    name: String,
+}
+
+async fn api_keys_create(
+    State(state): State<Arc<BridgeState>>,
+    Json(req): Json<CreateKeyReq>,
+) -> Response {
+    match state.security.create_key(&req.name) {
+        Ok((view, secret)) => Json(json!({ "key": view, "secret": secret })).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+async fn api_keys_delete(
+    State(state): State<Arc<BridgeState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    match state.security.revoke_key(&id) {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+async fn api_key_required_get(State(state): State<Arc<BridgeState>>) -> Response {
+    Json(json!({ "required": state.storage.settings().api_key_required })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct ApiKeyRequiredReq {
+    required: bool,
+}
+
+async fn api_key_required_set(
+    State(state): State<Arc<BridgeState>>,
+    Json(req): Json<ApiKeyRequiredReq>,
+) -> Response {
+    match state
+        .storage
+        .update_settings(|s| s.api_key_required = req.required)
+    {
+        Ok(_) => Json(json!({ "required": req.required })).into_response(),
+        Err(e) => error_response(e),
+    }
 }
 
 async fn api_auth_status(State(state): State<Arc<BridgeState>>) -> Response {
