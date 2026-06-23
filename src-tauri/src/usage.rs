@@ -172,6 +172,7 @@ pub fn usage_from_value(v: &Value) -> Option<(i64, i64, i64)> {
 /// - Non-SSE: accumulates the body (capped) and parses once at the end.
 pub struct UsageScanner {
     sse: bool,
+    decoder: crate::decode::Utf8Stream,
     buf: String,
     last: Option<(i64, i64, i64)>,
     capped: bool,
@@ -181,6 +182,7 @@ impl UsageScanner {
     pub fn new(sse: bool) -> Self {
         Self {
             sse,
+            decoder: crate::decode::Utf8Stream::new(),
             buf: String::new(),
             last: None,
             capped: false,
@@ -188,7 +190,8 @@ impl UsageScanner {
     }
 
     pub fn feed(&mut self, chunk: &[u8]) {
-        self.buf.push_str(&String::from_utf8_lossy(chunk));
+        let text = self.decoder.push(chunk);
+        self.buf.push_str(&text);
         if self.sse {
             loop {
                 let lf = self.buf.find("\n\n");

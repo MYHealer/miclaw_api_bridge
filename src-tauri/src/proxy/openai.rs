@@ -2,6 +2,7 @@ use super::transport::{
     emit_log, forward, list_models, map_err, proxy_response, proxy_response_tapped,
 };
 use super::ProxyController;
+use crate::decode::Utf8Stream;
 use axum::{
     body::Body,
     extract::State,
@@ -12,6 +13,7 @@ use axum::{
 use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -43,10 +45,18 @@ async fn chat_completions(ctrl: Arc<ProxyController>, body: Value) -> Response {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let want_usage = body
-        .pointer("/stream_options/include_usage")
+    // The RESPONSE shape is decided by what the CLIENT asked for, not by what
+    // the upstream happens to return (mimo sometimes replies with SSE even for
+    // a non-streaming request, and vice-versa).
+    let client_stream = body
+        .get("stream")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let want_usage = client_stream
+        && body
+            .pointer("/stream_options/include_usage")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
     let started = std::time::Instant::now();
     emit_log(
         &ctrl,
@@ -69,16 +79,19 @@ async fn chat_completions(ctrl: Arc<ProxyController>, body: Value) -> Response {
             if !status.is_success() {
                 return proxy_response(upstream).await;
             }
-            let is_sse = upstream
+            let upstream_sse = upstream
                 .headers()
                 .get(header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.contains("event-stream"))
                 .unwrap_or(false);
-            if is_sse {
-                chat_stream_normalized(ctrl, model_req, want_usage, upstream)
-            } else {
-                chat_nonstream_normalized(ctrl, model_req, upstream).await
+            match (client_stream, upstream_sse) {
+                (true, true) => chat_stream_normalized(ctrl, model_req, want_usage, upstream),
+                (true, false) => {
+                    chat_stream_from_json(ctrl, model_req, want_usage, upstream).await
+                }
+                (false, true) => chat_aggregate_sse(ctrl, model_req, upstream).await,
+                (false, false) => chat_nonstream_normalized(ctrl, model_req, upstream).await,
             }
         }
         Err(e) => {
@@ -205,10 +218,39 @@ fn normalize_chat_completion(v: &Value, model_req: &str) -> Value {
     })
 }
 
-async fn send_data(tx: &mpsc::Sender<Result<Bytes, std::io::Error>>, value: &Value) {
-    if let Ok(s) = serde_json::to_string(value) {
-        let _ = tx.send(Ok(Bytes::from(format!("data: {s}\n\n")))).await;
+async fn send_data(tx: &mpsc::Sender<Result<Bytes, std::io::Error>>, value: &Value) -> bool {
+    match serde_json::to_string(value) {
+        Ok(s) => tx
+            .send(Ok(Bytes::from(format!("data: {s}\n\n"))))
+            .await
+            .is_ok(),
+        Err(_) => true,
     }
+}
+
+/// Build a normalized streaming `delta` from an aggregated assistant message
+/// (used when re-emitting a non-stream upstream reply as a single chunk).
+fn delta_from_message(message: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    out.insert("role".into(), json!("assistant"));
+    if let Some(c) = message.get("content") {
+        if !c.is_null() {
+            out.insert("content".into(), c.clone());
+        }
+    }
+    if let Some(r) = message
+        .get("reasoning_content")
+        .or_else(|| message.get("reasoning"))
+    {
+        if !r.is_null() {
+            out.insert("reasoning_content".into(), r.clone());
+            out.insert("reasoning".into(), r.clone());
+        }
+    }
+    if let Some(tc) = message.get("tool_calls") {
+        out.insert("tool_calls".into(), tc.clone());
+    }
+    Value::Object(out)
 }
 
 fn chat_stream_normalized(
@@ -223,8 +265,10 @@ fn chat_stream_normalized(
 
     tokio::spawn(async move {
         let mut stream = upstream.bytes_stream();
+        let mut decoder = Utf8Stream::new();
         let mut buffer = String::new();
         let mut first = true;
+        let mut saw_finish = false;
         let mut model_seen = if model_req.is_empty() {
             crate::mimo::MODEL_DEFAULT.to_string()
         } else {
@@ -234,9 +278,29 @@ fn chat_stream_normalized(
         let mut agg_content = String::new();
         let mut agg_reasoning = String::new();
 
+        let envelope = |delta: Value, finish: Value, model: &str| -> Value {
+            let mut chunk = json!({
+                "id": id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "system_fingerprint": null,
+                "choices": [{
+                    "index": 0,
+                    "delta": delta,
+                    "logprobs": null,
+                    "finish_reason": finish,
+                }],
+            });
+            if want_usage {
+                chunk["usage"] = Value::Null;
+            }
+            chunk
+        };
+
         'outer: while let Some(chunk) = stream.next().await {
             let Ok(bytes) = chunk else { break };
-            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            buffer.push_str(&decoder.push(&bytes));
             while let Some(packet) = take_sse_packet(&mut buffer) {
                 let payload = sse_payload(&packet);
                 if payload.is_empty() {
@@ -263,10 +327,13 @@ fn chat_stream_normalized(
                 };
                 let delta = choice.get("delta").cloned().unwrap_or_else(|| json!({}));
                 let finish = choice.get("finish_reason").cloned().unwrap_or(Value::Null);
-                let empty_delta = delta.as_object().map(|o| o.is_empty()).unwrap_or(true);
-                // Drop pure keep-alive deltas (no payload, no finish) except the
-                // very first one (which carries the assistant role).
-                if empty_delta && finish.is_null() && !first {
+                let nn = |k: &str| delta.get(k).map(|x| !x.is_null()).unwrap_or(false);
+                let has_payload =
+                    nn("content") || nn("reasoning_content") || nn("reasoning") || nn("tool_calls");
+                let has_finish = !finish.is_null();
+                // Drop all-null / keep-alive deltas so we don't emit empty
+                // chunks, but never drop one carrying finish_reason.
+                if !has_payload && !has_finish {
                     continue;
                 }
                 let (norm, c, r) = normalize_chat_delta(&delta, first);
@@ -277,24 +344,18 @@ fn chat_stream_normalized(
                 if let Some(r) = r {
                     agg_reasoning.push_str(&r);
                 }
-                let mut chunk_obj = json!({
-                    "id": id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model_seen,
-                    "system_fingerprint": null,
-                    "choices": [{
-                        "index": 0,
-                        "delta": norm,
-                        "logprobs": null,
-                        "finish_reason": finish,
-                    }],
-                });
-                if want_usage {
-                    chunk_obj["usage"] = Value::Null;
+                if has_finish {
+                    saw_finish = true;
                 }
-                send_data(&tx, &chunk_obj).await;
+                if !send_data(&tx, &envelope(norm, finish, &model_seen)).await {
+                    return; // client disconnected; stop draining upstream
+                }
             }
+        }
+
+        // Guarantee a terminal chunk with finish_reason.
+        if !saw_finish {
+            let _ = send_data(&tx, &envelope(json!({}), json!("stop"), &model_seen)).await;
         }
 
         if want_usage {
@@ -310,13 +371,13 @@ fn chat_stream_normalized(
                 "choices": [],
                 "usage": usage,
             });
-            send_data(&tx, &usage_chunk).await;
+            let _ = send_data(&tx, &usage_chunk).await;
         }
         let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
 
         if let Some(u) = &usage_val {
             if let Some((p, c, t)) = crate::usage::usage_from_value(&json!({ "usage": u })) {
-                ctrl.usage.record(&model_req, p, c, t);
+                ctrl.usage.record(&model_seen, p, c, t);
             }
         }
         if ctrl.verbose() {
@@ -344,6 +405,257 @@ fn chat_stream_normalized(
         header::HeaderValue::from_static("no-cache"),
     );
     let mut resp = Response::new(Body::from_stream(body_stream));
+    *resp.status_mut() = StatusCode::OK;
+    *resp.headers_mut() = headers;
+    resp
+}
+
+#[derive(Default)]
+struct ToolAcc {
+    id: String,
+    name: String,
+    args: String,
+    typ: String,
+}
+
+/// Accumulator that folds an upstream chat SSE stream into one completion.
+#[derive(Default)]
+struct ChatAccum {
+    content: String,
+    reasoning: String,
+    finish: Value,
+    usage: Value,
+    model: String,
+    tools: BTreeMap<i64, ToolAcc>,
+    done: bool,
+}
+
+impl ChatAccum {
+    fn feed_buffer(&mut self, buffer: &mut String) {
+        while let Some(packet) = take_sse_packet(buffer) {
+            let payload = sse_payload(&packet);
+            if payload.is_empty() {
+                continue;
+            }
+            if payload == "[DONE]" {
+                self.done = true;
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(&payload) else {
+                continue;
+            };
+            if let Some(u) = v.get("usage") {
+                if !u.is_null() {
+                    self.usage = u.clone();
+                }
+            }
+            if let Some(m) = v.get("model").and_then(|x| x.as_str()) {
+                if !m.is_empty() {
+                    self.model = m.to_string();
+                }
+            }
+            let Some(choice) = v.pointer("/choices/0") else {
+                continue;
+            };
+            if let Some(f) = choice.get("finish_reason") {
+                if !f.is_null() {
+                    self.finish = f.clone();
+                }
+            }
+            let delta = choice.get("delta").cloned().unwrap_or_else(|| json!({}));
+            if let Some(s) = delta.get("content").and_then(|x| x.as_str()) {
+                self.content.push_str(s);
+            }
+            if let Some(s) = delta
+                .get("reasoning_content")
+                .or_else(|| delta.get("reasoning"))
+                .and_then(|x| x.as_str())
+            {
+                self.reasoning.push_str(s);
+            }
+            if let Some(arr) = delta.get("tool_calls").and_then(|x| x.as_array()) {
+                for tc in arr {
+                    let idx = tc.get("index").and_then(|x| x.as_i64()).unwrap_or(0);
+                    let e = self.tools.entry(idx).or_default();
+                    if let Some(id) = tc.get("id").and_then(|x| x.as_str()) {
+                        if !id.is_empty() {
+                            e.id = id.to_string();
+                        }
+                    }
+                    if let Some(t) = tc.get("type").and_then(|x| x.as_str()) {
+                        e.typ = t.to_string();
+                    }
+                    if let Some(f) = tc.get("function") {
+                        if let Some(n) = f.get("name").and_then(|x| x.as_str()) {
+                            if !n.is_empty() {
+                                e.name = n.to_string();
+                            }
+                        }
+                        if let Some(a) = f.get("arguments").and_then(|x| x.as_str()) {
+                            e.args.push_str(a);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Synthesize an upstream-shaped chat.completion for normalization.
+    fn into_completion(self) -> Value {
+        let mut message = serde_json::Map::new();
+        message.insert("role".into(), json!("assistant"));
+        let has_tools = !self.tools.is_empty();
+        message.insert(
+            "content".into(),
+            if self.content.is_empty() && has_tools {
+                Value::Null
+            } else {
+                json!(self.content)
+            },
+        );
+        if !self.reasoning.is_empty() {
+            message.insert("reasoning_content".into(), json!(self.reasoning));
+        }
+        let mut finish = self.finish;
+        if has_tools {
+            let arr: Vec<Value> = self
+                .tools
+                .into_iter()
+                .map(|(idx, t)| {
+                    json!({
+                        "index": idx,
+                        "id": t.id,
+                        "type": if t.typ.is_empty() { "function".to_string() } else { t.typ },
+                        "function": { "name": t.name, "arguments": t.args },
+                    })
+                })
+                .collect();
+            message.insert("tool_calls".into(), Value::Array(arr));
+            if finish.is_null() {
+                finish = json!("tool_calls");
+            }
+        }
+        if finish.is_null() {
+            finish = json!("stop");
+        }
+        json!({
+            "model": self.model,
+            "choices": [{ "message": Value::Object(message), "finish_reason": finish }],
+            "usage": self.usage,
+        })
+    }
+}
+
+/// Client asked for a non-streaming response but mimo answered with SSE:
+/// fold the stream into a single spec `chat.completion`.
+async fn chat_aggregate_sse(
+    ctrl: Arc<ProxyController>,
+    model_req: String,
+    upstream: reqwest::Response,
+) -> Response {
+    let mut stream = upstream.bytes_stream();
+    let mut decoder = Utf8Stream::new();
+    let mut buffer = String::new();
+    let mut state = ChatAccum::default();
+    while let Some(chunk) = stream.next().await {
+        let Ok(bytes) = chunk else { break };
+        buffer.push_str(&decoder.push(&bytes));
+        state.feed_buffer(&mut buffer);
+        if state.done {
+            break;
+        }
+    }
+    let synth = state.into_completion();
+    if let Some((p, c, t)) = crate::usage::usage_from_value(&synth) {
+        let m = synth
+            .get("model")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&model_req);
+        ctrl.usage.record(m, p, c, t);
+    }
+    let out = normalize_chat_completion(&synth, &model_req);
+    if ctrl.verbose() {
+        emit_log(
+            &ctrl,
+            json!({
+                "ts": chrono::Utc::now().timestamp_millis(),
+                "kind": "response",
+                "path": crate::mimo::PATH_CHAT,
+                "status": 200,
+                "body": out.clone(),
+            }),
+        );
+    }
+    Json(out).into_response()
+}
+
+/// Client asked for SSE but mimo replied with a single JSON object: re-emit it
+/// as a one-chunk stream so streaming clients still complete.
+async fn chat_stream_from_json(
+    ctrl: Arc<ProxyController>,
+    model_req: String,
+    want_usage: bool,
+    upstream: reqwest::Response,
+) -> Response {
+    let v = match upstream.json::<Value>().await {
+        Ok(v) => v,
+        Err(e) => return map_err(crate::error::BridgeError::from(e)),
+    };
+    if let Some((p, c, t)) = crate::usage::usage_from_value(&v) {
+        ctrl.usage.record(&model_req, p, c, t);
+    }
+    let completion = normalize_chat_completion(&v, &model_req);
+    let message = completion
+        .pointer("/choices/0/message")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let finish = completion
+        .pointer("/choices/0/finish_reason")
+        .cloned()
+        .unwrap_or(json!("stop"));
+
+    let mut chunk = json!({
+        "id": completion["id"],
+        "object": "chat.completion.chunk",
+        "created": completion["created"],
+        "model": completion["model"],
+        "system_fingerprint": null,
+        "choices": [{
+            "index": 0,
+            "delta": delta_from_message(&message),
+            "logprobs": null,
+            "finish_reason": finish,
+        }],
+    });
+    if want_usage {
+        chunk["usage"] = Value::Null;
+    }
+    let mut sse = format!("data: {chunk}\n\n");
+    if want_usage {
+        let usage_chunk = json!({
+            "id": completion["id"],
+            "object": "chat.completion.chunk",
+            "created": completion["created"],
+            "model": completion["model"],
+            "system_fingerprint": null,
+            "choices": [],
+            "usage": completion.get("usage").cloned().unwrap_or(Value::Null),
+        });
+        sse.push_str(&format!("data: {usage_chunk}\n\n"));
+    }
+    sse.push_str("data: [DONE]\n\n");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
+    let mut resp = Response::new(Body::from(sse));
     *resp.status_mut() = StatusCode::OK;
     *resp.headers_mut() = headers;
     resp
@@ -781,6 +1093,53 @@ fn response_from_chat(request: &Value, chat: &Value) -> Value {
     })
 }
 
+/// Build the three closing events for the reasoning output item.
+fn close_reasoning_events(rs_id: &str, reasoning: &str, seq: &mut i64) -> Vec<Value> {
+    let mut evts = Vec::new();
+    evts.push(json!({
+        "type": "response.reasoning_summary_text.done",
+        "item_id": rs_id, "output_index": 0, "summary_index": 0,
+        "text": reasoning, "sequence_number": *seq,
+    }));
+    *seq += 1;
+    evts.push(json!({
+        "type": "response.reasoning_summary_part.done",
+        "item_id": rs_id, "output_index": 0, "summary_index": 0,
+        "part": {"type": "summary_text", "text": reasoning}, "sequence_number": *seq,
+    }));
+    *seq += 1;
+    evts.push(json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": {"id": rs_id, "type": "reasoning", "summary": [{"type": "summary_text", "text": reasoning}], "status": "completed"},
+        "sequence_number": *seq,
+    }));
+    *seq += 1;
+    evts
+}
+
+/// Final `output` array for `response.completed`, using the SAME item ids that
+/// were streamed (reasoning item first when present, then the message).
+fn responses_final_output(rs_id: &str, reasoning: &str, msg_id: &str, text: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    if !reasoning.is_empty() {
+        out.push(json!({
+            "id": rs_id,
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": reasoning}],
+            "status": "completed",
+        }));
+    }
+    out.push(json!({
+        "id": msg_id,
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }));
+    out
+}
+
 fn response_output(msg_id: &str, text: &str, reasoning: &str) -> Vec<Value> {
     let mut output = Vec::new();
     if !reasoning.is_empty() {
@@ -834,6 +1193,7 @@ async fn responses_stream_from_chat(
     request: Value,
 ) -> Response {
     let response_id = new_response_id("resp");
+    let rs_id = new_response_id("rs");
     let msg_id = new_response_id("msg");
     let created_at = chrono::Utc::now().timestamp();
     let model = request
@@ -851,8 +1211,17 @@ async fn responses_stream_from_chat(
         let mut text = String::new();
         let mut reasoning = String::new();
         let mut usage = Value::Null;
+        let mut decoder = Utf8Stream::new();
         let mut buffer = String::new();
         let mut stream = upstream.bytes_stream();
+        // Reasoning and message are SEPARATE output items: reasoning at
+        // output_index 0 (opened lazily on the first reasoning token), the
+        // message after it. This matches OpenAI Responses semantics and keeps
+        // the streamed items consistent with the final `response.completed`.
+        let mut reasoning_opened = false;
+        let mut reasoning_closed = false;
+        let mut message_opened = false;
+        let mut msg_index = 0_i64;
 
         send_event(
             &tx,
@@ -888,36 +1257,6 @@ async fn responses_stream_from_chat(
         )
         .await;
         seq += 1;
-        send_event(
-            &tx,
-            json!({
-                "type": "response.output_item.added",
-                "output_index": 0,
-                "item": {
-                    "id": msg_id,
-                    "type": "message",
-                    "status": "in_progress",
-                    "role": "assistant",
-                    "content": [],
-                },
-                "sequence_number": seq,
-            }),
-        )
-        .await;
-        seq += 1;
-        send_event(
-            &tx,
-            json!({
-                "type": "response.content_part.added",
-                "item_id": msg_id,
-                "output_index": 0,
-                "content_index": 0,
-                "part": {"type": "output_text", "text": "", "annotations": []},
-                "sequence_number": seq,
-            }),
-        )
-        .await;
-        seq += 1;
 
         while let Some(chunk) = stream.next().await {
             let Ok(chunk) = chunk else {
@@ -933,7 +1272,7 @@ async fn responses_stream_from_chat(
                 .await;
                 return;
             };
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            buffer.push_str(&decoder.push(&chunk));
             while let Some(packet) = take_sse_packet(&mut buffer) {
                 let payload = sse_payload(&packet);
                 if payload.is_empty() {
@@ -955,14 +1294,41 @@ async fn responses_stream_from_chat(
                     .or_else(|| delta.get("reasoning"))
                     .and_then(|v| v.as_str())
                 {
+                    if !reasoning_opened {
+                        reasoning_opened = true;
+                        send_event(
+                            &tx,
+                            json!({
+                                "type": "response.output_item.added",
+                                "output_index": 0,
+                                "item": {"id": rs_id, "type": "reasoning", "summary": [], "status": "in_progress"},
+                                "sequence_number": seq,
+                            }),
+                        )
+                        .await;
+                        seq += 1;
+                        send_event(
+                            &tx,
+                            json!({
+                                "type": "response.reasoning_summary_part.added",
+                                "item_id": rs_id,
+                                "output_index": 0,
+                                "summary_index": 0,
+                                "part": {"type": "summary_text", "text": ""},
+                                "sequence_number": seq,
+                            }),
+                        )
+                        .await;
+                        seq += 1;
+                    }
                     reasoning.push_str(piece);
                     send_event(
                         &tx,
                         json!({
-                            "type": "response.reasoning_text.delta",
-                            "item_id": msg_id,
+                            "type": "response.reasoning_summary_text.delta",
+                            "item_id": rs_id,
                             "output_index": 0,
-                            "content_index": 0,
+                            "summary_index": 0,
                             "delta": piece,
                             "sequence_number": seq,
                         }),
@@ -971,13 +1337,48 @@ async fn responses_stream_from_chat(
                     seq += 1;
                 }
                 if let Some(piece) = delta.get("content").and_then(|v| v.as_str()) {
+                    // Reasoning precedes content; close the reasoning item first.
+                    if reasoning_opened && !reasoning_closed {
+                        reasoning_closed = true;
+                        for evt in close_reasoning_events(&rs_id, &reasoning, &mut seq) {
+                            send_event(&tx, evt).await;
+                        }
+                    }
+                    if !message_opened {
+                        message_opened = true;
+                        msg_index = if reasoning_opened { 1 } else { 0 };
+                        send_event(
+                            &tx,
+                            json!({
+                                "type": "response.output_item.added",
+                                "output_index": msg_index,
+                                "item": {"id": msg_id, "type": "message", "status": "in_progress", "role": "assistant", "content": []},
+                                "sequence_number": seq,
+                            }),
+                        )
+                        .await;
+                        seq += 1;
+                        send_event(
+                            &tx,
+                            json!({
+                                "type": "response.content_part.added",
+                                "item_id": msg_id,
+                                "output_index": msg_index,
+                                "content_index": 0,
+                                "part": {"type": "output_text", "text": "", "annotations": []},
+                                "sequence_number": seq,
+                            }),
+                        )
+                        .await;
+                        seq += 1;
+                    }
                     text.push_str(piece);
                     send_event(
                         &tx,
                         json!({
                             "type": "response.output_text.delta",
                             "item_id": msg_id,
-                            "output_index": 0,
+                            "output_index": msg_index,
                             "content_index": 0,
                             "delta": piece,
                             "sequence_number": seq,
@@ -996,12 +1397,52 @@ async fn responses_stream_from_chat(
         {
             ctrl.usage.record(&usage_model, p, c, t);
         }
+
+        // Close a reasoning item that never saw following content.
+        if reasoning_opened && !reasoning_closed {
+            reasoning_closed = true;
+            for evt in close_reasoning_events(&rs_id, &reasoning, &mut seq) {
+                send_event(&tx, evt).await;
+            }
+        }
+        let _ = reasoning_closed;
+        // OpenAI Responses always returns a message item; open an empty one if
+        // the upstream produced no visible content.
+        if !message_opened {
+            message_opened = true;
+            msg_index = if reasoning_opened { 1 } else { 0 };
+            send_event(
+                &tx,
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": msg_index,
+                    "item": {"id": msg_id, "type": "message", "status": "in_progress", "role": "assistant", "content": []},
+                    "sequence_number": seq,
+                }),
+            )
+            .await;
+            seq += 1;
+            send_event(
+                &tx,
+                json!({
+                    "type": "response.content_part.added",
+                    "item_id": msg_id,
+                    "output_index": msg_index,
+                    "content_index": 0,
+                    "part": {"type": "output_text", "text": "", "annotations": []},
+                    "sequence_number": seq,
+                }),
+            )
+            .await;
+            seq += 1;
+        }
+        let _ = message_opened;
         send_event(
             &tx,
             json!({
                 "type": "response.output_text.done",
                 "item_id": msg_id,
-                "output_index": 0,
+                "output_index": msg_index,
                 "content_index": 0,
                 "text": text,
                 "sequence_number": seq,
@@ -1014,7 +1455,7 @@ async fn responses_stream_from_chat(
             json!({
                 "type": "response.content_part.done",
                 "item_id": msg_id,
-                "output_index": 0,
+                "output_index": msg_index,
                 "content_index": 0,
                 "part": {"type": "output_text", "text": text, "annotations": []},
                 "sequence_number": seq,
@@ -1022,18 +1463,18 @@ async fn responses_stream_from_chat(
         )
         .await;
         seq += 1;
-        let output = response_output(&msg_id, &text, &reasoning);
         send_event(
             &tx,
             json!({
                 "type": "response.output_item.done",
-                "output_index": 0,
-                "item": output.last().cloned().unwrap_or(Value::Null),
+                "output_index": msg_index,
+                "item": {"id": msg_id, "type": "message", "status": "completed", "role": "assistant", "content": [{"type": "output_text", "text": text, "annotations": []}]},
                 "sequence_number": seq,
             }),
         )
         .await;
         seq += 1;
+        let output = responses_final_output(&rs_id, &reasoning, &msg_id, &text);
         send_event(
             &tx,
             response_event(
@@ -1247,5 +1688,53 @@ mod tests {
         assert_eq!(out["choices"][0]["message"]["reasoning"], "because");
         assert_eq!(out["usage"]["total_tokens"], 7);
         assert!(out["id"].as_str().is_some());
+    }
+
+    #[test]
+    fn accum_folds_sse_into_completion() {
+        let mut buf = String::new();
+        buf.push_str(
+            "data: {\"model\":\"m\",\"choices\":[{\"delta\":{\"reasoning_content\":\"th\"}}]}\n\n",
+        );
+        buf.push_str("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n");
+        buf.push_str("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\n");
+        buf.push_str("data: [DONE]\n\n");
+        let mut st = ChatAccum::default();
+        st.feed_buffer(&mut buf);
+        assert!(st.done);
+        let synth = st.into_completion();
+        let out = normalize_chat_completion(&synth, "m");
+        assert_eq!(out["object"], "chat.completion");
+        assert_eq!(out["choices"][0]["message"]["content"], "hi");
+        assert_eq!(out["choices"][0]["message"]["reasoning_content"], "th");
+        assert_eq!(out["choices"][0]["message"]["reasoning"], "th");
+        assert_eq!(out["choices"][0]["finish_reason"], "stop");
+        assert_eq!(out["usage"]["total_tokens"], 3);
+    }
+
+    #[test]
+    fn accum_assembles_tool_call_fragments() {
+        let mut buf = String::new();
+        buf.push_str("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"a\\\":\"}}]}}]}\n\n");
+        buf.push_str("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"1}\"}}]}}]}\n\n");
+        buf.push_str("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n");
+        let mut st = ChatAccum::default();
+        st.feed_buffer(&mut buf);
+        let synth = st.into_completion();
+        assert_eq!(synth["choices"][0]["finish_reason"], "tool_calls");
+        let tc = &synth["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(tc["id"], "call_1");
+        assert_eq!(tc["function"]["name"], "f");
+        assert_eq!(tc["function"]["arguments"], "{\"a\":1}");
+    }
+
+    #[test]
+    fn delta_from_message_mirrors_reasoning() {
+        let msg = json!({"role": "assistant", "content": "x", "reasoning_content": "y"});
+        let d = delta_from_message(&msg);
+        assert_eq!(d["role"], "assistant");
+        assert_eq!(d["content"], "x");
+        assert_eq!(d["reasoning_content"], "y");
+        assert_eq!(d["reasoning"], "y");
     }
 }
