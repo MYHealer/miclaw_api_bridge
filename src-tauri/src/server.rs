@@ -40,6 +40,7 @@ pub struct HttpServer {
     pub addr: SocketAddr,
     pub tls: bool,
     handle: Option<Handle>,
+    task: Option<tokio::task::JoinHandle<()>>,
     state: Arc<BridgeState>,
 }
 
@@ -52,6 +53,19 @@ impl HttpServer {
     pub fn shutdown(mut self) {
         if let Some(handle) = self.handle.take() {
             handle.graceful_shutdown(Some(Duration::from_secs(3)));
+        }
+        self.state.clear_bound_addr();
+    }
+
+    /// Stop immediately and wait for the serve task (and thus the listener) to
+    /// finish, so a fresh server can bind the same port right away. Used when
+    /// toggling TLS at runtime.
+    pub async fn shutdown_and_wait(mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.shutdown();
+        }
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
         }
         self.state.clear_bound_addr();
     }
@@ -76,7 +90,7 @@ pub async fn start_http(state: Arc<BridgeState>, config: ServerConfig) -> Result
     let bound = std_listener.local_addr().unwrap_or(addr);
     state.set_bound_addr(bound);
 
-    if tls_enabled {
+    let task = if tls_enabled {
         let tls_config = load_or_make_tls(&state).await?;
         let handle2 = handle.clone();
         let state2 = state.clone();
@@ -90,7 +104,7 @@ pub async fn start_http(state: Arc<BridgeState>, config: ServerConfig) -> Result
                 tracing::error!(target = "server", "https server failed: {e}");
             }
             state2.clear_bound_addr();
-        });
+        })
     } else {
         let handle2 = handle.clone();
         let state2 = state.clone();
@@ -104,13 +118,14 @@ pub async fn start_http(state: Arc<BridgeState>, config: ServerConfig) -> Result
                 tracing::error!(target = "server", "http server failed: {e}");
             }
             state2.clear_bound_addr();
-        });
-    }
+        })
+    };
 
     Ok(HttpServer {
         addr: bound,
         tls: tls_enabled,
         handle: Some(handle),
+        task: Some(task),
         state,
     })
 }
@@ -596,4 +611,36 @@ fn asset_response(path: &str, data: Cow<'static, [u8]>) -> Response {
             .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
     );
     (headers, data.into_owned()).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::BridgeState;
+    use crate::storage::Storage;
+
+    /// After `shutdown_and_wait`, the listener is released so a new server can
+    /// bind the exact same port — the basis for the desktop TLS toggle.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_and_wait_frees_the_port() {
+        let base = std::env::temp_dir().join(format!("mb-restart-{}", std::process::id()));
+        let storage = Storage::for_paths(base.join("c"), base.join("d")).unwrap();
+        let state = BridgeState::with_storage(storage).unwrap();
+
+        let host = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let first = start_http(state.clone(), ServerConfig { host, port: 0 })
+            .await
+            .expect("first bind");
+        let port = first.addr.port();
+        first.shutdown_and_wait().await;
+
+        // Re-bind the same port; would fail with EADDRINUSE if not released.
+        let second = start_http(state.clone(), ServerConfig { host, port })
+            .await
+            .expect("rebind same port after shutdown");
+        assert_eq!(second.addr.port(), port);
+        second.shutdown_and_wait().await;
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
