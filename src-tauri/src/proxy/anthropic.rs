@@ -210,6 +210,14 @@ fn anthropic_to_openai_chat(body: &Value) -> std::result::Result<Value, String> 
                                     .unwrap_or_default();
                                 tool_results.push((id, text));
                             }
+                            // Inbound `thinking` blocks (echoed back by clients
+                            // doing multi-turn extended thinking) are dropped on
+                            // purpose: mimo does not persist reasoning across
+                            // turns, and our outbound signatures are placeholders
+                            // (see THINKING_SIGNATURE_PLACEHOLDER). Forwarding
+                            // them would only risk an upstream signature check;
+                            // dropping them is safe but means prior-turn
+                            // reasoning context is not replayed.
                             _ => {}
                         }
                     }
@@ -550,6 +558,12 @@ impl SseTranslator {
                     "content": [],
                     "stop_reason": null,
                     "stop_sequence": null,
+                    // mimo only reports token usage in its final SSE packet, so
+                    // the real input count is unknown at message_start. Anthropic
+                    // normally puts a non-zero input_tokens here; we send 0 and
+                    // let the later `message_delta` carry the authoritative
+                    // (cumulative) usage. Clients that read message_start for a
+                    // token budget will under-count until that delta arrives.
                     "usage": {"input_tokens": 0, "output_tokens": 0}
                 }
             });

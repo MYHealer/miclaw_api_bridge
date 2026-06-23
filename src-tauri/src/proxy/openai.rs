@@ -22,6 +22,11 @@ const RESPONSES_MODE_UNKNOWN: u8 = 0;
 const RESPONSES_MODE_PASSTHROUGH: u8 = 1;
 const RESPONSES_MODE_COMPAT: u8 = 2;
 
+/// Upper bound for the in-flight SSE reassembly buffer. mimo's chunks are a few
+/// KB of JSON each; if the upstream never emits a `\n\n` delimiter the buffer
+/// would otherwise grow without limit, so we treat overflow as a stream error.
+const MAX_SSE_BUFFER: usize = 8 * 1024 * 1024;
+
 static RESPONSES_MODE: AtomicU8 = AtomicU8::new(RESPONSES_MODE_UNKNOWN);
 
 pub async fn chat(State(ctrl): State<Arc<ProxyController>>, Json(body): Json<Value>) -> Response {
@@ -298,9 +303,24 @@ fn chat_stream_normalized(
             chunk
         };
 
+        let mut stream_error = false;
         'outer: while let Some(chunk) = stream.next().await {
-            let Ok(bytes) = chunk else { break };
+            let bytes = match chunk {
+                Ok(b) => b,
+                Err(_) => {
+                    // Upstream transport failed mid-stream (connection reset,
+                    // decode error, ...). Record it so we don't fake a clean stop.
+                    stream_error = true;
+                    break;
+                }
+            };
             buffer.push_str(&decoder.push(&bytes));
+            // Guard against an upstream that never emits an SSE delimiter:
+            // bound the buffer so a runaway stream can't grow without limit.
+            if buffer.len() > MAX_SSE_BUFFER {
+                stream_error = true;
+                break;
+            }
             while let Some(packet) = take_sse_packet(&mut buffer) {
                 let payload = sse_payload(&packet);
                 if payload.is_empty() {
@@ -351,6 +371,47 @@ fn chat_stream_normalized(
                     return; // client disconnected; stop draining upstream
                 }
             }
+        }
+
+        // Upstream transport failed mid-stream before any finish_reason:
+        // surface an explicit error frame rather than faking a clean "stop"
+        // completion. Gateways keying off finish_reason (OpenRouter, LiteLLM,
+        // Cursor, ...) would otherwise read a truncated reply as success.
+        // We deliberately do NOT emit a final stop chunk or `[DONE]` here.
+        if stream_error && !saw_finish {
+            let _ = send_data(
+                &tx,
+                &json!({
+                    "error": {
+                        "type": "upstream_error",
+                        "code": "upstream_stream_error",
+                        "message": "upstream stream ended before completion",
+                    }
+                }),
+            )
+            .await;
+            if let Some(u) = &usage_val {
+                if let Some((p, c, t)) = crate::usage::usage_from_value(&json!({ "usage": u })) {
+                    ctrl.usage.record(&model_seen, p, c, t);
+                }
+            }
+            tracing::warn!(
+                target = "proxy",
+                "chat stream: upstream ended before completion (model={model_seen})"
+            );
+            if ctrl.verbose() {
+                emit_log(
+                    &ctrl,
+                    json!({
+                        "ts": chrono::Utc::now().timestamp_millis(),
+                        "kind": "error",
+                        "path": crate::mimo::PATH_CHAT,
+                        "message": "upstream stream ended before completion",
+                        "body": { "content": agg_content, "reasoning_content": agg_reasoning },
+                    }),
+                );
+            }
+            return;
         }
 
         // Guarantee a terminal chunk with finish_reason.
@@ -557,13 +618,33 @@ async fn chat_aggregate_sse(
     let mut decoder = Utf8Stream::new();
     let mut buffer = String::new();
     let mut state = ChatAccum::default();
+    let mut transport_err = false;
     while let Some(chunk) = stream.next().await {
-        let Ok(bytes) = chunk else { break };
+        let bytes = match chunk {
+            Ok(b) => b,
+            Err(_) => {
+                transport_err = true;
+                break;
+            }
+        };
         buffer.push_str(&decoder.push(&bytes));
+        if buffer.len() > MAX_SSE_BUFFER {
+            transport_err = true;
+            break;
+        }
         state.feed_buffer(&mut buffer);
         if state.done {
             break;
         }
+    }
+    // Truncated by an upstream transport error before any finish_reason or
+    // `[DONE]`: returning a 200 with a fake-complete body would hide the
+    // failure from the client, so surface a 502 instead.
+    let completed = state.done || !state.finish.is_null();
+    if transport_err && !completed {
+        return map_err(crate::error::BridgeError::Proxy(
+            "upstream stream ended before completion".into(),
+        ));
     }
     let synth = state.into_completion();
     if let Some((p, c, t)) = crate::usage::usage_from_value(&synth) {
@@ -1736,5 +1817,193 @@ mod tests {
         assert_eq!(d["content"], "x");
         assert_eq!(d["reasoning_content"], "y");
         assert_eq!(d["reasoning"], "y");
+    }
+
+    // ---- streaming-link end-to-end helpers ------------------------------
+
+    /// Build a fake upstream `reqwest::Response` from a sequence of byte
+    /// chunks (each may be an `Err` to simulate a transport failure).
+    fn upstream_from_parts(
+        parts: Vec<std::result::Result<Bytes, std::io::Error>>,
+        content_type: &str,
+    ) -> reqwest::Response {
+        let body = reqwest::Body::wrap_stream(futures::stream::iter(parts));
+        let http_resp = axum::http::Response::builder()
+            .status(200)
+            .header("content-type", content_type)
+            .body(body)
+            .unwrap();
+        reqwest::Response::from(http_resp)
+    }
+
+    fn ok_parts(chunks: &[&str]) -> Vec<std::result::Result<Bytes, std::io::Error>> {
+        chunks
+            .iter()
+            .map(|s| Ok(Bytes::from(s.to_string())))
+            .collect()
+    }
+
+    fn data(v: Value) -> String {
+        format!("data: {v}\n\n")
+    }
+
+    fn test_ctrl() -> Arc<ProxyController> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let auth = Arc::new(parking_lot::RwLock::new(crate::auth::AuthState::default()));
+        let mimo = Arc::new(crate::mimo::MimoClient::new(auth));
+        let emitter = crate::state::LogEmitter::new(Arc::new(crate::state::LogHub::new(16)));
+        let dir = std::env::temp_dir().join(format!("mb-openai-{}-{}", std::process::id(), n));
+        let storage =
+            crate::storage::Storage::for_paths(dir.join("c"), dir.join("d")).unwrap();
+        let usage = crate::usage::UsageStore::load(storage);
+        Arc::new(ProxyController::new(mimo, emitter, usage))
+    }
+
+    async fn body_text(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn stream_normalized_emits_role_reasoning_finish_usage_done() {
+        let parts = ok_parts(&[
+            &data(json!({"model":"m","choices":[{"delta":{"role":"assistant","content":""},"finish_reason":null,"index":0}]})),
+            &data(json!({"choices":[{"delta":{"reasoning_content":"think"},"finish_reason":null,"index":0}]})),
+            &data(json!({"choices":[{"delta":{"content":"hi"},"finish_reason":null,"index":0}]})),
+            &data(json!({"choices":[{"delta":{},"finish_reason":"stop","index":0}]})),
+            &data(json!({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}})),
+        ]);
+        let upstream = upstream_from_parts(parts, "text/event-stream");
+        let resp = chat_stream_normalized(test_ctrl(), "m".into(), true, upstream);
+        let out = body_text(resp).await;
+
+        assert!(out.contains("\"role\":\"assistant\""));
+        assert!(out.contains("\"reasoning_content\":\"think\""));
+        assert!(out.contains("\"reasoning\":\"think\""));
+        assert!(out.contains("\"content\":\"hi\""));
+        assert!(out.contains("\"finish_reason\":\"stop\""));
+        // Trailing usage-only chunk then [DONE], in that order.
+        let usage_at = out.find("\"choices\":[]").expect("usage-only chunk");
+        let done_at = out.rfind("data: [DONE]").expect("[DONE]");
+        assert!(usage_at < done_at);
+        assert!(out.contains("\"total_tokens\":13"));
+        assert!(out.trim_end().ends_with("data: [DONE]"));
+    }
+
+    #[tokio::test]
+    async fn stream_normalized_upstream_error_emits_error_frame() {
+        let mut parts = ok_parts(&[
+            &data(json!({"choices":[{"delta":{"role":"assistant","content":"par"},"finish_reason":null,"index":0}]})),
+            &data(json!({"choices":[{"delta":{"reasoning_content":"th"},"finish_reason":null,"index":0}]})),
+        ]);
+        parts.push(Err(std::io::Error::other("connection reset")));
+        let upstream = upstream_from_parts(parts, "text/event-stream");
+        let resp = chat_stream_normalized(test_ctrl(), "m".into(), false, upstream);
+        let out = body_text(resp).await;
+
+        // An explicit error frame, no fake stop and no [DONE].
+        assert!(out.contains("\"error\""));
+        assert!(out.contains("upstream_stream_error"));
+        assert!(!out.contains("\"finish_reason\":\"stop\""));
+        assert!(!out.contains("[DONE]"));
+    }
+
+    #[tokio::test]
+    async fn stream_normalized_synthesizes_finish_when_upstream_omits_it() {
+        // Clean EOF with no finish_reason and no error: we must still cap the
+        // stream with a synthetic finish_reason:"stop" + [DONE].
+        let parts = ok_parts(&[
+            &data(json!({"choices":[{"delta":{"role":"assistant","content":"hi"},"finish_reason":null,"index":0}]})),
+        ]);
+        let upstream = upstream_from_parts(parts, "text/event-stream");
+        let resp = chat_stream_normalized(test_ctrl(), "m".into(), false, upstream);
+        let out = body_text(resp).await;
+
+        assert!(out.contains("\"finish_reason\":\"stop\""));
+        assert!(!out.contains("\"error\""));
+        assert!(out.trim_end().ends_with("data: [DONE]"));
+    }
+
+    #[tokio::test]
+    async fn stream_normalized_reassembles_utf8_split_across_chunks() {
+        // Build a complete SSE stream, then slice it into tiny byte windows so
+        // multibyte characters straddle chunk boundaries.
+        let sse = format!(
+            "{}{}data: [DONE]\n\n",
+            data(json!({"choices":[{"delta":{"role":"assistant","content":"你好世界"},"finish_reason":null,"index":0}]})),
+            data(json!({"choices":[{"delta":{},"finish_reason":"stop","index":0}]})),
+        );
+        let bytes = sse.into_bytes();
+        let parts: Vec<std::result::Result<Bytes, std::io::Error>> = bytes
+            .chunks(5)
+            .map(|c| Ok(Bytes::copy_from_slice(c)))
+            .collect();
+        let upstream = upstream_from_parts(parts, "text/event-stream");
+        let resp = chat_stream_normalized(test_ctrl(), "m".into(), false, upstream);
+        let out = body_text(resp).await;
+
+        assert!(out.contains("\"content\":\"你好世界\""));
+        assert!(!out.contains('\u{FFFD}')); // no replacement chars
+    }
+
+    #[tokio::test]
+    async fn aggregate_sse_folds_to_single_completion_with_tools() {
+        let parts = ok_parts(&[
+            &data(json!({"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\""}}]},"finish_reason":null,"index":0}]})),
+            &data(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"hi\"}"}}]},"finish_reason":null,"index":0}]})),
+            &data(json!({"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}]})),
+            "data: [DONE]\n\n",
+        ]);
+        let upstream = upstream_from_parts(parts, "text/event-stream");
+        let resp = chat_aggregate_sse(test_ctrl(), "m".into(), upstream).await;
+        let v: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+
+        assert_eq!(v["object"], "chat.completion");
+        assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+        let tc = &v["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(tc["id"], "call_1");
+        assert_eq!(tc["function"]["name"], "lookup");
+        assert_eq!(tc["function"]["arguments"], "{\"q\":\"hi\"}");
+    }
+
+    #[tokio::test]
+    async fn aggregate_sse_truncated_returns_gateway_error() {
+        let mut parts = ok_parts(&[
+            &data(json!({"choices":[{"delta":{"role":"assistant","content":"par"},"finish_reason":null,"index":0}]})),
+        ]);
+        parts.push(Err(std::io::Error::other("connection reset")));
+        let upstream = upstream_from_parts(parts, "text/event-stream");
+        let resp = chat_aggregate_sse(test_ctrl(), "m".into(), upstream).await;
+        // Truncated before completion → 502, not a fake-complete 200.
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn stream_from_json_emits_single_chunk_then_usage_then_done() {
+        let json_body = json!({
+            "model": "m",
+            "choices": [{
+                "message": {"role": "assistant", "content": "hi", "reasoning_content": "th"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
+        });
+        let parts = ok_parts(&[&json_body.to_string()]);
+        let upstream = upstream_from_parts(parts, "application/json");
+        let resp = chat_stream_from_json(test_ctrl(), "m".into(), true, upstream).await;
+        let out = body_text(resp).await;
+
+        assert!(out.contains("\"object\":\"chat.completion.chunk\""));
+        assert!(out.contains("\"content\":\"hi\""));
+        assert!(out.contains("\"reasoning\":\"th\""));
+        assert!(out.contains("\"finish_reason\":\"stop\""));
+        let usage_at = out.find("\"total_tokens\":3").expect("usage chunk");
+        let done_at = out.rfind("data: [DONE]").expect("[DONE]");
+        assert!(usage_at < done_at);
+        assert!(out.trim_end().ends_with("data: [DONE]"));
     }
 }
