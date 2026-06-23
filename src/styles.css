@@ -134,7 +134,7 @@ code {
   min-width: 92px;
   padding: 0 22px;
   border: 0;
-  border-right: 1px solid var(--line);
+  /* border-right: 1px solid var(--line); */
   background: transparent;
   color: var(--ink);
   font-weight: 700;
@@ -746,6 +746,9 @@ select:focus {
   .signed-in,
   .two-factor-row,
   .notice,
+  .secret-reveal,
+  .chart-wrap,
+  .axis-label,
   .log-row,
   .arrow-link {
     margin-left: 72px;

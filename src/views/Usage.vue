@@ -201,8 +201,8 @@ onBeforeUnmount(() => {
           </text>
         </g>
       </svg>
-      <p v-else-if="report" class="notice">该时间段内还没有用量记录。</p>
-      <p v-else class="notice">加载中…</p>
+      <p v-else-if="report" class="notice" style="margin-left: 0;"  >该时间段内还没有用量记录。</p>
+      <p v-else class="notice" style="margin-left: 0;">加载中…</p>
     </div>
 
     <div v-if="models.length" class="legend">
