@@ -23,7 +23,358 @@ const RESPONSES_MODE_COMPAT: u8 = 2;
 static RESPONSES_MODE: AtomicU8 = AtomicU8::new(RESPONSES_MODE_UNKNOWN);
 
 pub async fn chat(State(ctrl): State<Arc<ProxyController>>, Json(body): Json<Value>) -> Response {
-    forward(ctrl.clone(), crate::mimo::PATH_CHAT, body).await
+    chat_completions(ctrl, body).await
+}
+
+/// `/v1/chat/completions`: proxy to mimo, but NORMALIZE the response into a
+/// spec-compliant OpenAI Chat Completion(.chunk).
+///
+/// mimo emits a long run of `delta.reasoning_content` before any
+/// `delta.content`; raw passthrough makes gateways that only read `content`
+/// (or that key reasoning off `reasoning` rather than `reasoning_content`)
+/// look like streaming is broken / the thinking trace is missing. We:
+///   * re-emit well-formed chunks (id / object / created / model /
+///     `delta.role` on the first / `finish_reason` / final usage / `[DONE]`),
+///   * keep reasoning as `reasoning_content` AND mirror it to `reasoning`, so
+///     both DeepSeek-style and OpenRouter-style consumers render it.
+async fn chat_completions(ctrl: Arc<ProxyController>, body: Value) -> Response {
+    let model_req = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let want_usage = body
+        .pointer("/stream_options/include_usage")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let started = std::time::Instant::now();
+    emit_log(
+        &ctrl,
+        super::transport::request_log(&ctrl, crate::mimo::PATH_CHAT, &body),
+    );
+
+    match ctrl.mimo.post_json(crate::mimo::PATH_CHAT, body).await {
+        Ok(upstream) => {
+            let status = upstream.status();
+            emit_log(
+                &ctrl,
+                json!({
+                    "ts": chrono::Utc::now().timestamp_millis(),
+                    "kind": "response",
+                    "path": crate::mimo::PATH_CHAT,
+                    "status": status.as_u16(),
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                }),
+            );
+            if !status.is_success() {
+                return proxy_response(upstream).await;
+            }
+            let is_sse = upstream
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.contains("event-stream"))
+                .unwrap_or(false);
+            if is_sse {
+                chat_stream_normalized(ctrl, model_req, want_usage, upstream)
+            } else {
+                chat_nonstream_normalized(ctrl, model_req, upstream).await
+            }
+        }
+        Err(e) => {
+            emit_log(
+                &ctrl,
+                json!({
+                    "ts": chrono::Utc::now().timestamp_millis(),
+                    "kind": "error",
+                    "path": crate::mimo::PATH_CHAT,
+                    "message": e.to_string(),
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                }),
+            );
+            map_err(e)
+        }
+    }
+}
+
+fn chat_id() -> String {
+    format!("chatcmpl-{}", uuid::Uuid::new_v4().simple())
+}
+
+/// Normalize a single streamed `delta`: keep content / tool_calls, add the
+/// assistant role on the first chunk, and mirror reasoning to both fields.
+/// Returns the delta plus any (content, reasoning) text for aggregation.
+fn normalize_chat_delta(delta: &Value, first: bool) -> (Value, Option<String>, Option<String>) {
+    let mut out = serde_json::Map::new();
+    if first {
+        out.insert("role".into(), json!("assistant"));
+    }
+    let mut content_txt = None;
+    if let Some(c) = delta.get("content") {
+        if !c.is_null() {
+            out.insert("content".into(), c.clone());
+            if let Some(s) = c.as_str() {
+                content_txt = Some(s.to_string());
+            }
+        }
+    }
+    let mut reasoning_txt = None;
+    if let Some(r) = delta
+        .get("reasoning_content")
+        .or_else(|| delta.get("reasoning"))
+    {
+        if !r.is_null() {
+            out.insert("reasoning_content".into(), r.clone());
+            out.insert("reasoning".into(), r.clone());
+            if let Some(s) = r.as_str() {
+                reasoning_txt = Some(s.to_string());
+            }
+        }
+    }
+    if let Some(tc) = delta.get("tool_calls") {
+        out.insert("tool_calls".into(), tc.clone());
+    }
+    (Value::Object(out), content_txt, reasoning_txt)
+}
+
+/// Normalize a non-streamed completion into a spec `chat.completion` object.
+fn normalize_chat_completion(v: &Value, model_req: &str) -> Value {
+    let message = v
+        .pointer("/choices/0/message")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let finish = v
+        .pointer("/choices/0/finish_reason")
+        .cloned()
+        .unwrap_or_else(|| json!("stop"));
+
+    let mut out_msg = serde_json::Map::new();
+    out_msg.insert("role".into(), json!("assistant"));
+    out_msg.insert(
+        "content".into(),
+        message.get("content").cloned().unwrap_or(Value::Null),
+    );
+    if let Some(r) = message
+        .get("reasoning_content")
+        .or_else(|| message.get("reasoning"))
+    {
+        if !r.is_null() {
+            out_msg.insert("reasoning_content".into(), r.clone());
+            out_msg.insert("reasoning".into(), r.clone());
+        }
+    }
+    if let Some(tc) = message.get("tool_calls") {
+        out_msg.insert("tool_calls".into(), tc.clone());
+    }
+
+    let model_out = v
+        .get("model")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            if model_req.is_empty() {
+                crate::mimo::MODEL_DEFAULT.to_string()
+            } else {
+                model_req.to_string()
+            }
+        });
+    let id = v
+        .get("id")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(chat_id);
+    let created = v
+        .get("created")
+        .and_then(|x| x.as_i64())
+        .unwrap_or_else(|| chrono::Utc::now().timestamp());
+
+    json!({
+        "id": id,
+        "object": "chat.completion",
+        "created": created,
+        "model": model_out,
+        "system_fingerprint": null,
+        "choices": [{
+            "index": 0,
+            "message": Value::Object(out_msg),
+            "logprobs": null,
+            "finish_reason": finish,
+        }],
+        "usage": v.get("usage").cloned().unwrap_or(Value::Null),
+    })
+}
+
+async fn send_data(tx: &mpsc::Sender<Result<Bytes, std::io::Error>>, value: &Value) {
+    if let Ok(s) = serde_json::to_string(value) {
+        let _ = tx.send(Ok(Bytes::from(format!("data: {s}\n\n")))).await;
+    }
+}
+
+fn chat_stream_normalized(
+    ctrl: Arc<ProxyController>,
+    model_req: String,
+    want_usage: bool,
+    upstream: reqwest::Response,
+) -> Response {
+    let id = chat_id();
+    let created = chrono::Utc::now().timestamp();
+    let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(32);
+
+    tokio::spawn(async move {
+        let mut stream = upstream.bytes_stream();
+        let mut buffer = String::new();
+        let mut first = true;
+        let mut model_seen = if model_req.is_empty() {
+            crate::mimo::MODEL_DEFAULT.to_string()
+        } else {
+            model_req.clone()
+        };
+        let mut usage_val: Option<Value> = None;
+        let mut agg_content = String::new();
+        let mut agg_reasoning = String::new();
+
+        'outer: while let Some(chunk) = stream.next().await {
+            let Ok(bytes) = chunk else { break };
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            while let Some(packet) = take_sse_packet(&mut buffer) {
+                let payload = sse_payload(&packet);
+                if payload.is_empty() {
+                    continue;
+                }
+                if payload == "[DONE]" {
+                    break 'outer;
+                }
+                let Ok(v) = serde_json::from_str::<Value>(&payload) else {
+                    continue;
+                };
+                if let Some(u) = v.get("usage") {
+                    if !u.is_null() {
+                        usage_val = Some(u.clone());
+                    }
+                }
+                if let Some(m) = v.get("model").and_then(|x| x.as_str()) {
+                    if !m.is_empty() {
+                        model_seen = m.to_string();
+                    }
+                }
+                let Some(choice) = v.pointer("/choices/0") else {
+                    continue;
+                };
+                let delta = choice.get("delta").cloned().unwrap_or_else(|| json!({}));
+                let finish = choice.get("finish_reason").cloned().unwrap_or(Value::Null);
+                let empty_delta = delta.as_object().map(|o| o.is_empty()).unwrap_or(true);
+                // Drop pure keep-alive deltas (no payload, no finish) except the
+                // very first one (which carries the assistant role).
+                if empty_delta && finish.is_null() && !first {
+                    continue;
+                }
+                let (norm, c, r) = normalize_chat_delta(&delta, first);
+                first = false;
+                if let Some(c) = c {
+                    agg_content.push_str(&c);
+                }
+                if let Some(r) = r {
+                    agg_reasoning.push_str(&r);
+                }
+                let mut chunk_obj = json!({
+                    "id": id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_seen,
+                    "system_fingerprint": null,
+                    "choices": [{
+                        "index": 0,
+                        "delta": norm,
+                        "logprobs": null,
+                        "finish_reason": finish,
+                    }],
+                });
+                if want_usage {
+                    chunk_obj["usage"] = Value::Null;
+                }
+                send_data(&tx, &chunk_obj).await;
+            }
+        }
+
+        if want_usage {
+            let usage = usage_val.clone().unwrap_or_else(
+                || json!({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}),
+            );
+            let usage_chunk = json!({
+                "id": id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_seen,
+                "system_fingerprint": null,
+                "choices": [],
+                "usage": usage,
+            });
+            send_data(&tx, &usage_chunk).await;
+        }
+        let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
+
+        if let Some(u) = &usage_val {
+            if let Some((p, c, t)) = crate::usage::usage_from_value(&json!({ "usage": u })) {
+                ctrl.usage.record(&model_req, p, c, t);
+            }
+        }
+        if ctrl.verbose() {
+            emit_log(
+                &ctrl,
+                json!({
+                    "ts": chrono::Utc::now().timestamp_millis(),
+                    "kind": "response",
+                    "path": crate::mimo::PATH_CHAT,
+                    "body": { "content": agg_content, "reasoning_content": agg_reasoning },
+                }),
+            );
+        }
+    });
+
+    let body_stream =
+        futures_util::stream::unfold(rx, |mut rx| async { rx.recv().await.map(|i| (i, rx)) });
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
+    let mut resp = Response::new(Body::from_stream(body_stream));
+    *resp.status_mut() = StatusCode::OK;
+    *resp.headers_mut() = headers;
+    resp
+}
+
+async fn chat_nonstream_normalized(
+    ctrl: Arc<ProxyController>,
+    model_req: String,
+    upstream: reqwest::Response,
+) -> Response {
+    let v = match upstream.json::<Value>().await {
+        Ok(v) => v,
+        Err(e) => return map_err(crate::error::BridgeError::from(e)),
+    };
+    if let Some((p, c, t)) = crate::usage::usage_from_value(&v) {
+        ctrl.usage.record(&model_req, p, c, t);
+    }
+    let out = normalize_chat_completion(&v, &model_req);
+    if ctrl.verbose() {
+        emit_log(
+            &ctrl,
+            json!({
+                "ts": chrono::Utc::now().timestamp_millis(),
+                "kind": "response",
+                "path": crate::mimo::PATH_CHAT,
+                "status": 200,
+                "body": out.clone(),
+            }),
+        );
+    }
+    Json(out).into_response()
 }
 
 pub async fn responses(
@@ -852,5 +1203,49 @@ mod tests {
         assert_eq!(response["output_text"], "hello");
         assert_eq!(response["usage"]["total_tokens"], 7);
         assert_eq!(response["output"][0]["type"], "reasoning");
+    }
+
+    #[test]
+    fn chat_delta_mirrors_reasoning_and_sets_role() {
+        // reasoning-only delta on the first chunk: role added, reasoning mirrored.
+        let (d, c, r) = normalize_chat_delta(&json!({"reasoning_content": "think"}), true);
+        assert_eq!(d["role"], "assistant");
+        assert_eq!(d["reasoning_content"], "think");
+        assert_eq!(d["reasoning"], "think");
+        assert!(d.get("content").is_none());
+        assert_eq!(c, None);
+        assert_eq!(r.as_deref(), Some("think"));
+
+        // content delta (not first): no role, content preserved.
+        let (d2, c2, _) = normalize_chat_delta(&json!({"content": "hi"}), false);
+        assert!(d2.get("role").is_none());
+        assert_eq!(d2["content"], "hi");
+        assert_eq!(c2.as_deref(), Some("hi"));
+
+        // upstream that only uses `reasoning` is still mirrored to both.
+        let (d3, _, _) = normalize_chat_delta(&json!({"reasoning": "x"}), false);
+        assert_eq!(d3["reasoning_content"], "x");
+        assert_eq!(d3["reasoning"], "x");
+    }
+
+    #[test]
+    fn nonstream_completion_is_normalized() {
+        let upstream = json!({
+            "model": "xiaomi/mimo-pro",
+            "choices": [{
+                "message": {"role": "assistant", "content": "hello", "reasoning_content": "because"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 5, "total_tokens": 7}
+        });
+        let out = normalize_chat_completion(&upstream, "mimo-pro");
+        assert_eq!(out["object"], "chat.completion");
+        assert_eq!(out["choices"][0]["index"], 0);
+        assert_eq!(out["choices"][0]["finish_reason"], "stop");
+        assert_eq!(out["choices"][0]["message"]["content"], "hello");
+        assert_eq!(out["choices"][0]["message"]["reasoning_content"], "because");
+        assert_eq!(out["choices"][0]["message"]["reasoning"], "because");
+        assert_eq!(out["usage"]["total_tokens"], 7);
+        assert!(out["id"].as_str().is_some());
     }
 }
