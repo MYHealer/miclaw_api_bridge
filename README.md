@@ -86,6 +86,26 @@ Serve the WebUI and proxy over TLS. With `--tls` and no cert supplied, a self-si
 ./miclaw_api_bridge server --tls
 ```
 
+The auto-generated cert lists these names in its SAN, so any of them validate once the cert is trusted:
+
+- `localhost`, `127.0.0.1`, `::1`
+- `local.miclawbridge.com` — a placeholder hostname for access by name. Map it to wherever the bridge runs (hosts file or local DNS) and you get a warning-free HTTPS origin without regenerating a per-IP cert:
+
+  ```
+  # macOS/Linux: /etc/hosts        Windows: C:\Windows\System32\drivers\etc\hosts
+  127.0.0.1       local.miclawbridge.com     # bridge on this machine
+  192.168.2.1     local.miclawbridge.com     # bridge on a router/NAS at 192.168.2.1
+  ```
+
+  Then use `https://local.miclawbridge.com:8765/v1`. Trust the cert once (see below); the hostname matches the SAN, so there's no name-mismatch warning.
+
+**Trusting the self-signed cert**
+
+- macOS: `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain <config-dir>/tls-cert.pem`
+- SDK clients that ship their own CA store ignore the OS keychain — point them at the PEM directly: Node `NODE_EXTRA_CA_CERTS=<path>/tls-cert.pem`, Python `SSL_CERT_FILE=<path>/tls-cert.pem`, curl `--cacert <path>/tls-cert.pem`.
+
+> The cert is generated once and cached. If you upgrade from an older build (whose cert predates `local.miclawbridge.com`), delete `tls-cert.pem` and `tls-key.pem` in the config directory and restart so a cert with the new SAN is regenerated. Config dir: macOS `~/Library/Application Support/com.neoruaa.miclaw_api_bridge/`, OpenWrt `/etc/miclaw_api_bridge/config/miclaw_api_bridge/`.
+
 Bring your own PEM cert/key (either flag implies `--tls`):
 
 ```bash

@@ -101,8 +101,35 @@ uci commit miclaw_api_bridge
 ```
 
 然后用 `https://<路由IP>:8765/` 访问。证书是自签的，浏览器会提示「不安全/证书无效」，
-点继续访问即可（证书的 SAN 是 localhost/127.0.0.1，按 IP 访问还会有域名不匹配提示，
-属正常）。关闭 HTTPS：`uci set ...tls=0; uci commit; /etc/init.d/... restart`。
+点继续访问即可。
+
+**用域名 + 信任证书，去掉告警**
+
+自签证书的 SAN 现在包含一个占位域名 `local.miclawbridge.com`（以及
+`localhost`/`127.0.0.1`/`::1`）。在你的客户端机器上把它指到路由器 IP：
+
+```
+# /etc/hosts （Windows 为 C:\Windows\System32\drivers\etc\hosts）
+192.168.2.1   local.miclawbridge.com
+```
+
+然后信任路由器上那张证书（从路由器取下 `tls-cert.pem`）：
+
+```bash
+scp root@192.168.2.1:/etc/miclaw_api_bridge/config/miclaw_api_bridge/tls-cert.pem .
+# macOS：加入系统钥匙串并信任
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain tls-cert.pem
+```
+
+之后用 `https://local.miclawbridge.com:8765/`、`.../v1` 访问，主机名与 SAN 匹配，
+不再有告警。SDK 客户端若自带 CA 库（Node / Python），分别用
+`NODE_EXTRA_CA_CERTS` / `SSL_CERT_FILE` 指向这张 `tls-cert.pem`。
+
+> 已装过旧版（证书早于 `local.miclawbridge.com`）？删掉路由器上
+> `/etc/miclaw_api_bridge/config/miclaw_api_bridge/tls-cert.pem` 和 `tls-key.pem`
+> 再 `/etc/init.d/miclaw_api_bridge restart`，会重新生成带新 SAN 的证书。
+
+关闭 HTTPS：`uci set ...tls=0; uci commit; /etc/init.d/... restart`。
 
 想用受信任证书（无浏览器告警），把自己的 PEM 证书/私钥路径填进 UCI：
 

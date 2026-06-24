@@ -151,6 +151,13 @@ async fn load_or_make_tls(state: &Arc<BridgeState>) -> Result<RustlsConfig> {
             "localhost".to_string(),
             "127.0.0.1".to_string(),
             "::1".to_string(),
+            // A stable, non-resolving placeholder hostname so users can map it
+            // (via hosts file / local DNS) to wherever the bridge runs and get
+            // a name that matches the cert's SAN — e.g. on a router:
+            //   192.168.2.1  local.miclawbridge.com
+            // Trusting this self-signed cert then yields a warning-free HTTPS
+            // origin without per-IP cert regeneration. Documented in README.
+            "local.miclawbridge.com".to_string(),
         ];
         let generated = rcgen::generate_simple_self_signed(sans)
             .map_err(|e| BridgeError::Proxy(e.to_string()))?;
