@@ -39,12 +39,22 @@ async function submit() {
     } else {
       await api.adminSetup(password.value);
     }
+    // Password is now set (or we just logged in); the first-run guide flag is
+    // no longer relevant.
+    localStorage.removeItem("miclaw.skipPwSetup");
     router.replace("/dashboard");
   } catch (e: any) {
     error.value = e?.message ?? String(e);
   } finally {
     busy.value = false;
   }
+}
+
+// First-run guide opt-out: remember the choice in this browser so the guard
+// stops steering here, then continue to the dashboard.
+function skipSetup() {
+  localStorage.setItem("miclaw.skipPwSetup", "1");
+  router.replace("/dashboard");
 }
 
 onMounted(load);
@@ -82,6 +92,9 @@ onMounted(load);
           :disabled="busy || !password || (!configured && !confirm)"
         >
           {{ configured ? "登录" : "设置并进入" }}
+        </button>
+        <button v-if="!configured" class="ghost-action" type="button" @click="skipSetup">
+          暂不设置，先进入后台
         </button>
       </form>
 

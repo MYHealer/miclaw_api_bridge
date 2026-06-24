@@ -18,3 +18,4 @@ src-tauri/gen
 
 # build artifacts
 *.log
+/src-tauri/target-musl

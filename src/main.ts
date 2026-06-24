@@ -24,13 +24,21 @@ const router = createRouter({
   ],
 });
 
-// Admin-session guard: once a password is configured, redirect to the login
-// page until the session cookie is valid. The login page itself is exempt.
+// Admin-session guard.
+//   - Once a password is configured: redirect to the login page until the
+//     session cookie is valid.
+//   - Before any password is configured: steer first-time visitors to the
+//     setup page (the "首次访问引导设密码" flow), unless they explicitly chose
+//     to skip it in this browser. The login/setup page itself is always exempt.
 router.beforeEach(async (to) => {
   if (to.path === "/admin-login") return true;
   try {
     const s = await api.adminSession();
-    if (s.configured && !s.authenticated) return "/admin-login";
+    if (s.configured) {
+      if (!s.authenticated) return "/admin-login";
+    } else if (localStorage.getItem("miclaw.skipPwSetup") !== "1") {
+      return "/admin-login";
+    }
   } catch {
     /* if the status check fails, let the page load and surface errors itself */
   }

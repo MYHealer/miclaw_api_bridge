@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watchEffect } from "vue";
+import { computed, onMounted, ref, watch, watchEffect } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
 import appIcon from "../src-tauri/icons/icon.png";
 
@@ -22,6 +22,36 @@ const pageTitle = computed(() => {
 });
 
 const isAuthGate = computed(() => route.path.includes("admin-login"));
+
+// Password-setup reminder banner. It appears once the user chose "暂不设置"
+// on the setup page (skipPwSetup flag) and a password is still not set. The
+// first close swaps the prompt for a how-to hint; the second close dismisses
+// it for good (pwBannerDismissed flag).
+const SKIP_KEY = "miclaw.skipPwSetup";
+const DISMISS_KEY = "miclaw.pwBannerDismissed";
+const skipActive = ref(localStorage.getItem(SKIP_KEY) === "1");
+const bannerClosed = ref(localStorage.getItem(DISMISS_KEY) === "1");
+const bannerStage = ref(0); // 0 = prompt, 1 = how-to hint
+
+const showBanner = computed(() => skipActive.value && !bannerClosed.value && !isAuthGate.value);
+
+function refreshBannerFlags() {
+  skipActive.value = localStorage.getItem(SKIP_KEY) === "1";
+  bannerClosed.value = localStorage.getItem(DISMISS_KEY) === "1";
+}
+
+function dismissBanner() {
+  if (bannerStage.value === 0) {
+    bannerStage.value = 1;
+  } else {
+    localStorage.setItem(DISMISS_KEY, "1");
+    bannerClosed.value = true;
+  }
+}
+
+// localStorage is not reactive; re-read whenever navigation happens (the skip
+// action navigates to /dashboard, which triggers this).
+watch(() => route.path, refreshBannerFlags);
 
 function applyTheme(next: Theme) {
   theme.value = next;
@@ -47,7 +77,25 @@ watchEffect(() => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <div class="app-shell" :class="{ 'has-banner': showBanner }">
+    <div v-if="showBanner" class="pw-banner" role="status">
+      <span class="pw-banner-text" v-if="bannerStage === 0">
+        管理后台尚未设置密码，建议
+        <RouterLink to="/admin-login">设置管理后台密码</RouterLink>
+      </span>
+      <span class="pw-banner-text" v-else>
+        需要时在地址栏访问 <code>#/admin-login</code> 即可进入设置页。
+      </span>
+      <button
+        class="pw-banner-close"
+        type="button"
+        :aria-label="bannerStage === 0 ? '关闭提示' : '彻底关闭提示'"
+        @click="dismissBanner"
+      >
+        ×
+      </button>
+    </div>
+
     <header class="topbar">
       <RouterLink class="brand-lockup" to="/dashboard" aria-label="miclaw_api_bridge dashboard">
         <img :src="appIcon" alt="" />
