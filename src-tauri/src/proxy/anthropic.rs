@@ -35,6 +35,12 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use uuid::Uuid;
 
+/// mimo provides no Anthropic thinking-block signature; this placeholder is
+/// sent so the SSE shape is valid. It is NOT a real Anthropic signature and
+/// won't validate if echoed back to Anthropic upstream (irrelevant here, since
+/// the bridge ignores it on inbound requests).
+const THINKING_SIGNATURE_PLACEHOLDER: &str = "mimo-bridge-unsigned";
+
 pub async fn messages(
     State(ctrl): State<Arc<ProxyController>>,
     Json(body): Json<Value>,
@@ -54,6 +60,11 @@ pub async fn messages(
         .and_then(|v| v.as_str())
         .unwrap_or(crate::mimo::MODEL_DEFAULT)
         .to_string();
+    // Anthropic only surfaces thinking blocks when the client opted in via
+    // `thinking: {type: "enabled"}`. Otherwise we must NOT emit thinking blocks
+    // (some clients reject unexpected ones), so the reasoning trace is dropped.
+    let thinking_enabled =
+        body.pointer("/thinking/type").and_then(|v| v.as_str()) == Some("enabled");
     let started = std::time::Instant::now();
     let mut req_log = json!({
         "ts": chrono::Utc::now().timestamp_millis(),
@@ -86,9 +97,9 @@ pub async fn messages(
                 return (status, text).into_response();
             }
             if stream_requested {
-                stream_anthropic(upstream, model)
+                stream_anthropic(upstream, model, ctrl.usage.clone(), thinking_enabled)
             } else {
-                aggregate_anthropic(upstream, model).await
+                aggregate_anthropic(upstream, model, ctrl.usage.clone(), thinking_enabled).await
             }
         }
         Err(e) => {
@@ -199,6 +210,14 @@ fn anthropic_to_openai_chat(body: &Value) -> std::result::Result<Value, String> 
                                     .unwrap_or_default();
                                 tool_results.push((id, text));
                             }
+                            // Inbound `thinking` blocks (echoed back by clients
+                            // doing multi-turn extended thinking) are dropped on
+                            // purpose: mimo does not persist reasoning across
+                            // turns, and our outbound signatures are placeholders
+                            // (see THINKING_SIGNATURE_PLACEHOLDER). Forwarding
+                            // them would only risk an upstream signature check;
+                            // dropping them is safe but means prior-turn
+                            // reasoning context is not replayed.
                             _ => {}
                         }
                     }
@@ -267,8 +286,18 @@ fn anthropic_to_openai_chat(body: &Value) -> std::result::Result<Value, String> 
     Ok(Value::Object(out))
 }
 
-fn stream_anthropic(upstream: reqwest::Response, model: String) -> Response {
-    let stream = SseTranslator::new(upstream.bytes_stream().boxed(), model);
+fn stream_anthropic(
+    upstream: reqwest::Response,
+    model: String,
+    usage: Arc<crate::usage::UsageStore>,
+    thinking_enabled: bool,
+) -> Response {
+    let stream = SseTranslator::new(
+        upstream.bytes_stream().boxed(),
+        model,
+        usage,
+        thinking_enabled,
+    );
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
@@ -277,7 +306,12 @@ fn stream_anthropic(upstream: reqwest::Response, model: String) -> Response {
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-async fn aggregate_anthropic(upstream: reqwest::Response, model: String) -> Response {
+async fn aggregate_anthropic(
+    upstream: reqwest::Response,
+    model: String,
+    usage: Arc<crate::usage::UsageStore>,
+    thinking_enabled: bool,
+) -> Response {
     // Even when stream=false, mimo may still respond with SSE; collect chunks.
     let body_text = upstream.text().await.unwrap_or_default();
     let mut text = String::new();
@@ -357,14 +391,24 @@ async fn aggregate_anthropic(upstream: reqwest::Response, model: String) -> Resp
     }
 
     let mut content: Vec<Value> = Vec::new();
-    if !thinking.is_empty() {
-        content.push(json!({"type": "thinking", "thinking": thinking}));
+    if thinking_enabled && !thinking.is_empty() {
+        content.push(json!({
+            "type": "thinking",
+            "thinking": thinking,
+            "signature": THINKING_SIGNATURE_PLACEHOLDER,
+        }));
     }
     if !text.is_empty() {
         content.push(json!({"type": "text", "text": text}));
     }
     content.extend(tool_uses);
 
+    usage.record(
+        &model,
+        input_tokens as i64,
+        output_tokens as i64,
+        (input_tokens + output_tokens) as i64,
+    );
     let payload = json!({
         "id": format!("msg_{}", Uuid::new_v4().simple()),
         "type": "message",
@@ -412,8 +456,11 @@ struct ToolBuilder {
 /// Messages SSE events.
 struct SseTranslator {
     inner: futures::stream::BoxStream<'static, std::result::Result<Bytes, reqwest::Error>>,
+    decoder: crate::decode::Utf8Stream,
     buf: String,
     model: String,
+    usage: Arc<crate::usage::UsageStore>,
+    thinking_enabled: bool,
     state: TranslatorState,
 }
 
@@ -453,11 +500,16 @@ impl SseTranslator {
     fn new(
         inner: futures::stream::BoxStream<'static, std::result::Result<Bytes, reqwest::Error>>,
         model: String,
+        usage: Arc<crate::usage::UsageStore>,
+        thinking_enabled: bool,
     ) -> Self {
         Self {
             inner,
+            decoder: crate::decode::Utf8Stream::new(),
             buf: String::new(),
             model,
+            usage,
+            thinking_enabled,
             state: TranslatorState::default(),
         }
     }
@@ -506,6 +558,12 @@ impl SseTranslator {
                     "content": [],
                     "stop_reason": null,
                     "stop_sequence": null,
+                    // mimo only reports token usage in its final SSE packet, so
+                    // the real input count is unknown at message_start. Anthropic
+                    // normally puts a non-zero input_tokens here; we send 0 and
+                    // let the later `message_delta` carry the authoritative
+                    // (cumulative) usage. Clients that read message_start for a
+                    // token budget will under-count until that delta arrives.
                     "usage": {"input_tokens": 0, "output_tokens": 0}
                 }
             });
@@ -532,16 +590,23 @@ impl SseTranslator {
                 None => continue,
             };
 
-            // Thinking delta (mimo emits reasoning_content chunks).
-            if let Some(s) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
-                if !s.is_empty() {
-                    self.ensure_open(OpenBlock::Thinking, &mut out);
-                    let evt = json!({
-                        "type": "content_block_delta",
-                        "index": self.current_index(),
-                        "delta": {"type": "thinking_delta", "thinking": s}
-                    });
-                    out.push(format_sse("content_block_delta", &evt));
+            // Thinking delta (mimo emits reasoning_content chunks). Only emit
+            // thinking blocks when the client enabled extended thinking.
+            if self.thinking_enabled {
+                if let Some(s) = delta
+                    .get("reasoning_content")
+                    .or_else(|| delta.get("reasoning"))
+                    .and_then(|v| v.as_str())
+                {
+                    if !s.is_empty() {
+                        self.ensure_open(OpenBlock::Thinking, &mut out);
+                        let evt = json!({
+                            "type": "content_block_delta",
+                            "index": self.current_index(),
+                            "delta": {"type": "thinking_delta", "thinking": s}
+                        });
+                        out.push(format_sse("content_block_delta", &evt));
+                    }
                 }
             }
 
@@ -707,6 +772,17 @@ impl SseTranslator {
                     .unwrap_or(self.state.next_index.saturating_sub(1)),
                 _ => self.state.next_index.saturating_sub(1),
             };
+            // Extended-thinking blocks must carry a signature, emitted as a
+            // signature_delta just before content_block_stop. mimo provides no
+            // real signature, so we send a clearly-marked placeholder.
+            if matches!(open, OpenBlock::Thinking) {
+                let sig = json!({
+                    "type": "content_block_delta",
+                    "index": idx,
+                    "delta": {"type": "signature_delta", "signature": THINKING_SIGNATURE_PLACEHOLDER},
+                });
+                out.push(format_sse("content_block_delta", &sig));
+            }
             let evt = json!({"type": "content_block_stop", "index": idx});
             out.push(format_sse("content_block_stop", &evt));
         }
@@ -750,6 +826,12 @@ impl SseTranslator {
         });
         out.push(format_sse("message_delta", &evt));
         out.push(format_sse("message_stop", &json!({"type": "message_stop"})));
+        self.usage.record(
+            &self.model,
+            self.state.input_tokens as i64,
+            self.state.output_tokens as i64,
+            (self.state.input_tokens + self.state.output_tokens) as i64,
+        );
         self.state.finished = true;
     }
 }
@@ -775,9 +857,8 @@ impl Stream for SseTranslator {
             // Fetch more upstream bytes.
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(chunk))) => {
-                    if let Ok(s) = std::str::from_utf8(&chunk) {
-                        this.buf.push_str(s);
-                    }
+                    let text = this.decoder.push(&chunk);
+                    this.buf.push_str(&text);
                     continue;
                 }
                 Poll::Ready(Some(Err(e))) => {
@@ -804,16 +885,28 @@ mod tests {
     /// Helper: feed a sequence of OpenAI-style chunks into the translator
     /// and return the concatenated Anthropic SSE output.
     fn run(chunks: &[Value]) -> String {
+        run_with(chunks, true)
+    }
+
+    fn run_with(chunks: &[Value], thinking_enabled: bool) -> String {
         let model = "mimo-omni".to_string();
         // The Stream impl drives via `pop_event` over a buffer of bytes;
         // for a unit test we exercise `translate` and `finish` directly.
         let inner = futures::stream::empty().boxed();
-        let mut t = SseTranslator::new(inner, model);
+        let dir = std::env::temp_dir().join(format!(
+            "mb-anthropic-{}-{}",
+            std::process::id(),
+            thinking_enabled
+        ));
+        let storage = crate::storage::Storage::for_paths(dir.join("c"), dir.join("d")).unwrap();
+        let usage = crate::usage::UsageStore::load(storage);
+        let mut t = SseTranslator::new(inner, model, usage, thinking_enabled);
         let mut out: Vec<String> = Vec::new();
         for c in chunks {
             out.extend(t.translate(&c.to_string()));
         }
         t.finish(&mut out);
+        let _ = std::fs::remove_dir_all(&dir);
         out.concat()
     }
 
@@ -948,5 +1041,56 @@ mod tests {
         let tools = openai["tools"].as_array().unwrap();
         assert_eq!(tools[0]["type"].as_str(), Some("function"));
         assert_eq!(tools[0]["function"]["name"].as_str(), Some("fn"));
+    }
+
+    /// chunks carrying reasoning_content + content + finish, reused by the
+    /// thinking on/off tests below.
+    fn thinking_chunks() -> Vec<Value> {
+        vec![
+            json!({
+                "id": "th", "model": "mimo",
+                "choices": [{"delta": {"role": "assistant", "content": ""}, "finish_reason": null, "index": 0}],
+            }),
+            json!({
+                "id": "th",
+                "choices": [{"delta": {"reasoning_content": "let me think"}, "finish_reason": null, "index": 0}],
+            }),
+            json!({
+                "id": "th",
+                "choices": [{"delta": {"content": "answer"}, "finish_reason": null, "index": 0}],
+            }),
+            json!({
+                "id": "th",
+                "choices": [{"delta": {}, "finish_reason": "stop", "index": 0}],
+            }),
+        ]
+    }
+
+    #[test]
+    fn thinking_disabled_emits_no_thinking() {
+        let out = run_with(&thinking_chunks(), false);
+        // No thinking block at all when the client did not request thinking.
+        assert!(!out.contains("\"type\":\"thinking_delta\""));
+        assert!(!out.contains("\"type\":\"thinking\""));
+        assert!(!out.contains("\"type\":\"signature_delta\""));
+        // The visible text still flows through.
+        assert!(out.contains("\"type\":\"text_delta\""));
+        assert!(out.contains("\"text\":\"answer\""));
+        // Only the text block is opened/closed.
+        assert_eq!(count_event(&out, "content_block_start"), 1);
+        assert_eq!(count_event(&out, "content_block_stop"), 1);
+    }
+
+    #[test]
+    fn thinking_enabled_emits_signature() {
+        let out = run_with(&thinking_chunks(), true);
+        // Thinking deltas present, and a signature_delta closes the block.
+        assert!(out.contains("\"type\":\"thinking_delta\""));
+        assert!(out.contains("\"thinking\":\"let me think\""));
+        assert!(out.contains("\"type\":\"signature_delta\""));
+        assert!(out.contains(THINKING_SIGNATURE_PLACEHOLDER));
+        // Both thinking + text blocks present.
+        assert_eq!(count_event(&out, "content_block_start"), 2);
+        assert_eq!(count_event(&out, "content_block_stop"), 2);
     }
 }

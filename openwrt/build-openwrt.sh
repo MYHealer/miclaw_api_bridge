@@ -34,6 +34,11 @@ test -f "$ROOT/dist/index.html" || { echo "!! dist/ not produced" >&2; exit 1; }
 # --- 2. Cross-compile the Rust server binary --------------------------------
 cd "$ROOT/src-tauri"
 
+# `cross` builds inside a container that only mounts this src-tauri workspace;
+# expose the host-built ../dist (inlined by rust-embed) via the MICLAW_DIST_DIR
+# volume declared in src-tauri/Cross.toml.
+export MICLAW_DIST_DIR="$ROOT/dist"
+
 build_with_cross() {
   echo "==> cross build for $TARGET (docker)"
   cross build --release --no-default-features --target "$TARGET" --bin miclaw_api_bridge

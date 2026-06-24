@@ -7,6 +7,7 @@ use miclaw_api_bridge_lib::error::{BridgeError, Result};
 use miclaw_api_bridge_lib::server::{start_http, HttpServer, ServerConfig};
 use miclaw_api_bridge_lib::state::BridgeState;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
 #[cfg(not(target_os = "linux"))]
 enum UserEvent {
@@ -21,12 +22,20 @@ fn main() {
     }
 }
 
-fn start_runtime_and_server() -> Result<(tokio::runtime::Runtime, HttpServer, String)> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+fn build_runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(BridgeError::other)?;
-    let state = BridgeState::new()?;
+        .map_err(BridgeError::other)
+}
+
+/// Start (or restart) the local HTTP server using the current persisted
+/// settings (port + TLS). Returns the server handle and the WebUI URL, whose
+/// scheme already reflects http/https.
+fn start_server(
+    runtime: &tokio::runtime::Runtime,
+    state: Arc<BridgeState>,
+) -> Result<(HttpServer, String)> {
     let port = state.storage.settings().proxy_port;
     let server = runtime.block_on(start_http(
         state,
@@ -35,8 +44,23 @@ fn start_runtime_and_server() -> Result<(tokio::runtime::Runtime, HttpServer, St
             port,
         },
     ))?;
-    let webui_url = server.webui_url();
-    Ok((runtime, server, webui_url))
+    let url = server.webui_url();
+    Ok((server, url))
+}
+
+/// Flip the persisted TLS flag; returns the new value.
+fn toggle_tls(state: &Arc<BridgeState>) -> Result<bool> {
+    let next = !state.storage.settings().tls_enabled;
+    state.storage.update_settings(|s| s.tls_enabled = next)?;
+    Ok(next)
+}
+
+fn tls_menu_label(tls: bool) -> &'static str {
+    if tls {
+        "关闭 HTTPS"
+    } else {
+        "启用 HTTPS"
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -46,12 +70,14 @@ fn run() -> Result<()> {
 
     enum Command {
         OpenWebui,
+        ToggleTls,
         Quit,
     }
 
     struct LinuxTray {
         tx: mpsc::Sender<Command>,
         icon: Vec<ksni::Icon>,
+        tls: bool,
     }
 
     impl ksni::Tray for LinuxTray {
@@ -82,12 +108,21 @@ fn run() -> Result<()> {
 
         fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
             let open_tx = self.tx.clone();
+            let tls_tx = self.tx.clone();
             let quit_tx = self.tx.clone();
             vec![
                 StandardItem {
                     label: "打开webui".into(),
                     activate: Box::new(move |_| {
                         let _ = open_tx.send(Command::OpenWebui);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+                StandardItem {
+                    label: tls_menu_label(self.tls).into(),
+                    activate: Box::new(move |_| {
+                        let _ = tls_tx.send(Command::ToggleTls);
                     }),
                     ..Default::default()
                 }
@@ -105,11 +140,16 @@ fn run() -> Result<()> {
         }
     }
 
-    let (_runtime, server, webui_url) = start_runtime_and_server()?;
+    let runtime = build_runtime()?;
+    let state = BridgeState::new()?;
+    let (server, mut webui_url) = start_server(&runtime, state.clone())?;
+    let tls_on = state.storage.settings().tls_enabled;
+
     let (tx, rx) = mpsc::channel();
     let service = ksni::TrayService::new(LinuxTray {
         tx,
         icon: load_ksni_icons()?,
+        tls: tls_on,
     });
     let handle = service.handle();
     std::thread::spawn(move || {
@@ -126,6 +166,24 @@ fn run() -> Result<()> {
             Command::OpenWebui => {
                 let _ = open::that(&webui_url);
             }
+            Command::ToggleTls => match toggle_tls(&state) {
+                Ok(new_tls) => {
+                    if let Some(server) = server.take() {
+                        runtime.block_on(server.shutdown_and_wait());
+                    }
+                    match start_server(&runtime, state.clone()) {
+                        Ok((s, url)) => {
+                            server = Some(s);
+                            webui_url = url;
+                        }
+                        Err(e) => {
+                            tracing::error!(target = "desktop", "restart after tls toggle: {e}")
+                        }
+                    }
+                    handle.update(|tray: &mut LinuxTray| tray.tls = new_tls);
+                }
+                Err(e) => tracing::error!(target = "desktop", "toggle tls: {e}"),
+            },
             Command::Quit => {
                 handle.shutdown();
                 if let Some(server) = server.take() {
@@ -146,9 +204,11 @@ fn run() -> Result<()> {
     use tray_icon::TrayIconBuilder;
 
     struct DesktopRuntime {
-        _tokio: tokio::runtime::Runtime,
+        tokio: tokio::runtime::Runtime,
+        state: Arc<BridgeState>,
         server: Option<HttpServer>,
         webui_url: String,
+        tls_item: MenuItem,
         _tray: tray_icon::TrayIcon,
     }
 
@@ -157,6 +217,22 @@ fn run() -> Result<()> {
             if let Some(server) = self.server.take() {
                 server.shutdown();
             }
+        }
+
+        /// Apply the current persisted TLS setting by restarting the server,
+        /// then refresh the WebUI URL and the toggle label.
+        fn restart_for_tls(&mut self, new_tls: bool) {
+            if let Some(server) = self.server.take() {
+                self.tokio.block_on(server.shutdown_and_wait());
+            }
+            match start_server(&self.tokio, self.state.clone()) {
+                Ok((server, url)) => {
+                    self.server = Some(server);
+                    self.webui_url = url;
+                }
+                Err(e) => tracing::error!(target = "desktop", "restart after tls toggle: {e}"),
+            }
+            self.tls_item.set_text(tls_menu_label(new_tls));
         }
     }
 
@@ -168,10 +244,16 @@ fn run() -> Result<()> {
         let _ = proxy.send_event(UserEvent::Menu(event));
     }));
 
-    let (runtime, server, webui_url) = start_runtime_and_server()?;
+    let runtime = build_runtime()?;
+    let state = BridgeState::new()?;
+    let (server, webui_url) = start_server(&runtime, state.clone())?;
+    let tls_on = state.storage.settings().tls_enabled;
+
     let open_item = MenuItem::with_id("open_webui", "打开webui", true, None);
+    let tls_item = MenuItem::with_id("toggle_tls", tls_menu_label(tls_on), true, None);
     let quit_item = MenuItem::with_id("quit", "退出", true, None);
-    let tray_menu = Menu::with_items(&[&open_item, &quit_item]).map_err(BridgeError::other)?;
+    let tray_menu =
+        Menu::with_items(&[&open_item, &tls_item, &quit_item]).map_err(BridgeError::other)?;
     let tray = TrayIconBuilder::new()
         .with_tooltip("miclaw_api_bridge")
         .with_menu(Box::new(tray_menu))
@@ -183,9 +265,11 @@ fn run() -> Result<()> {
     open::that(&webui_url).map_err(BridgeError::other)?;
 
     let mut desktop = DesktopRuntime {
-        _tokio: runtime,
+        tokio: runtime,
+        state,
         server: Some(server),
         webui_url,
+        tls_item,
         _tray: tray,
     };
 
@@ -196,6 +280,10 @@ fn run() -> Result<()> {
                 "open_webui" => {
                     let _ = open::that(&desktop.webui_url);
                 }
+                "toggle_tls" => match toggle_tls(&desktop.state) {
+                    Ok(new_tls) => desktop.restart_for_tls(new_tls),
+                    Err(e) => tracing::error!(target = "desktop", "toggle tls: {e}"),
+                },
                 "quit" => {
                     desktop.shutdown();
                     *control_flow = ControlFlow::Exit;

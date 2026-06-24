@@ -123,7 +123,10 @@ onMounted(refreshAll);
       </div>
       <div>
         <span class="label">API Key</span>
-        <code>任意字符串</code>
+        <!-- <RouterLink class="arrow-link" to="/keys">管理密钥</RouterLink> -->
+        <code>
+          <a href="keys#/keys">管理密钥 ></a>
+        </code>
       </div>
     </div>
   </section>

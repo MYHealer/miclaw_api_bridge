@@ -79,6 +79,11 @@ jobs:
       - name: Cross-compile server binary
         run: |
           set -euo pipefail
+          # The WebUI was built into ./dist on the host. `cross` builds inside a
+          # container that only mounts ./src-tauri, so expose ../dist to it via
+          # the MICLAW_DIST_DIR volume declared in src-tauri/Cross.toml.
+          export MICLAW_DIST_DIR="$GITHUB_WORKSPACE/dist"
+          test -f "$MICLAW_DIST_DIR/index.html" || { echo "!! dist/ not built" >&2; exit 1; }
           cd src-tauri
           export CC_mipsel_unknown_linux_musl=/tmp/mipsel-cc
           export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER=/tmp/mipsel-linker

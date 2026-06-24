@@ -26,8 +26,44 @@ export interface ModelInfo {
   family: string;
 }
 
+export interface AdminSession {
+  configured: boolean;
+  authenticated: boolean;
+}
+
+export interface ApiKeyView {
+  id: string;
+  name: string;
+  prefix: string;
+  created_at: number;
+  last_used: number | null;
+}
+
+export interface UsageModelBreakdown {
+  prompt: number;
+  completion: number;
+  total: number;
+}
+
+export interface UsageBucket {
+  t: number;
+  total: number;
+  models: Record<string, UsageModelBreakdown>;
+}
+
+export interface UsageReport {
+  window: string;
+  bucket_seconds: number;
+  start: number;
+  end: number;
+  grand_total: number;
+  model_totals: Record<string, number>;
+  buckets: UsageBucket[];
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(path, {
+    credentials: "same-origin",
     ...init,
     headers: {
       "content-type": "application/json",
@@ -38,7 +74,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const data = text ? JSON.parse(text) : null;
   if (!resp.ok) {
     const message = data?.error?.message ?? `${resp.status} ${resp.statusText}`;
-    throw new Error(message);
+    const err = new Error(message) as Error & { status?: number };
+    err.status = resp.status;
+    throw err;
   }
   return data as T;
 }
@@ -65,4 +103,24 @@ export const api = {
   getVerboseLogs: () => request<{ enabled: boolean }>("/api/logs/verbose"),
   setVerboseLogs: (enabled: boolean) =>
     post<{ enabled: boolean }>("/api/logs/verbose", { enabled }),
+
+  // admin password auth
+  adminSession: () => request<AdminSession>("/api/admin/session"),
+  adminSetup: (password: string) => post<{ ok: boolean }>("/api/admin/setup", { password }),
+  adminLogin: (password: string) => post<{ ok: boolean }>("/api/admin/login", { password }),
+  adminLogout: () => post<{ ok: boolean }>("/api/admin/logout"),
+  changePassword: (old_password: string, new_password: string) =>
+    post<{ ok: boolean }>("/api/admin/password", { old_password, new_password }),
+
+  // api keys
+  listKeys: () => request<ApiKeyView[]>("/api/keys"),
+  createKey: (name: string) =>
+    post<{ key: ApiKeyView; secret: string }>("/api/keys", { name }),
+  deleteKey: (id: string) => request<{ ok: boolean }>(`/api/keys/${id}`, { method: "DELETE" }),
+  getApiKeyRequired: () => request<{ required: boolean }>("/api/settings/api-key-required"),
+  setApiKeyRequired: (required: boolean) =>
+    post<{ required: boolean }>("/api/settings/api-key-required", { required }),
+
+  // usage stats
+  usage: (window: string) => request<UsageReport>(`/api/usage?window=${window}`),
 };

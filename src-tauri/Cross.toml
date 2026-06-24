@@ -1,0 +1,14 @@
+# `cross` runs the compile inside a Docker container that, by default, only
+# mounts the Cargo workspace (this `src-tauri` directory). The WebUI is built
+# on the host into the sibling `../dist` folder and inlined at compile time via
+# `#[derive(RustEmbed)] #[folder = "../dist"]` in server.rs — that path lives
+# OUTSIDE the workspace, so the container can't see it and the proc-macro fails
+# with "folder '.../dist' does not exist".
+#
+# `volumes` lists environment variable names whose (absolute) values cross will
+# bind-mount into the container at the same path. Exporting MICLAW_DIST_DIR to
+# the host's dist directory before `cross build` therefore makes `../dist`
+# resolve inside the container. See openwrt/build-openwrt.sh and
+# .github/workflows/openwrt.yml.
+[build.env]
+volumes = ["MICLAW_DIST_DIR"]

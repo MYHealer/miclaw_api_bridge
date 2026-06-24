@@ -1,13 +1,16 @@
 //! miclaw_api_bridge: bridge Xiaomi mimo into local OpenAI/Claude compatible APIs.
 
 pub mod auth;
+pub mod decode;
 pub mod error;
 pub mod mimo;
 pub mod proxy;
+pub mod security;
 pub mod server;
 pub mod service;
 pub mod state;
 pub mod storage;
+pub mod usage;
 
 pub fn init_tracing() {
     let _ = tracing_subscriber::fmt()

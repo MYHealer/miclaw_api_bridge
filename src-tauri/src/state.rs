@@ -15,6 +15,8 @@ pub struct BridgeState {
     pub mimo: Arc<MimoClient>,
     pub proxy: Arc<crate::proxy::ProxyController>,
     pub logs: Arc<LogHub>,
+    pub security: Arc<crate::security::Security>,
+    pub usage: Arc<crate::usage::UsageStore>,
     bound_addr: RwLock<Option<SocketAddr>>,
 }
 
@@ -29,13 +31,21 @@ impl BridgeState {
         let mimo = Arc::new(MimoClient::new(auth.clone()));
         let logs = Arc::new(LogHub::new(500));
         let emitter = LogEmitter::new(logs.clone());
-        let proxy = Arc::new(crate::proxy::ProxyController::new(mimo.clone(), emitter));
+        let security = crate::security::Security::load(storage.clone())?;
+        let usage = crate::usage::UsageStore::load(storage.clone());
+        let proxy = Arc::new(crate::proxy::ProxyController::new(
+            mimo.clone(),
+            emitter,
+            usage.clone(),
+        ));
         Ok(Arc::new(Self {
             storage,
             auth,
             mimo,
             proxy,
             logs,
+            security,
+            usage,
             bound_addr: RwLock::new(None),
         }))
     }

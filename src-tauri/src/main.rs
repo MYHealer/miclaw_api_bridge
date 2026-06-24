@@ -31,6 +31,15 @@ enum Command {
         host: IpAddr,
         #[arg(long)]
         port: Option<u16>,
+        /// Serve over HTTPS (self-signed cert auto-generated if no cert given).
+        #[arg(long)]
+        tls: bool,
+        /// Custom TLS certificate chain (PEM). Implies --tls.
+        #[arg(long)]
+        tls_cert: Option<String>,
+        /// Custom TLS private key (PEM). Implies --tls.
+        #[arg(long)]
+        tls_key: Option<String>,
     },
     /// Show auth and proxy status from a running local server.
     Status {
@@ -108,8 +117,17 @@ async fn run() -> Result<()> {
     match cli.command.unwrap_or(Command::Server {
         host: IpAddr::V4(Ipv4Addr::LOCALHOST),
         port: None,
+        tls: false,
+        tls_cert: None,
+        tls_key: None,
     }) {
-        Command::Server { host, port } => run_server(host, port).await,
+        Command::Server {
+            host,
+            port,
+            tls,
+            tls_cert,
+            tls_key,
+        } => run_server(host, port, tls, tls_cert, tls_key).await,
         Command::Status { base_url } => status(base_url).await,
         Command::Login {
             base_url,
@@ -184,8 +202,22 @@ async fn run() -> Result<()> {
     }
 }
 
-async fn run_server(host: IpAddr, port: Option<u16>) -> Result<()> {
+async fn run_server(
+    host: IpAddr,
+    port: Option<u16>,
+    tls: bool,
+    tls_cert: Option<String>,
+    tls_key: Option<String>,
+) -> Result<()> {
     let state = BridgeState::new()?;
+    // TLS is flag-authoritative: each `server` run sets the persisted TLS state
+    // from the CLI flags, so `--tls` enables it and a plain run disables it.
+    // On OpenWrt the init script passes these flags based on the `tls` UCI option.
+    state.storage.update_settings(|s| {
+        s.tls_enabled = tls || tls_cert.is_some() || tls_key.is_some();
+        s.tls_cert_path = tls_cert.clone();
+        s.tls_key_path = tls_key.clone();
+    })?;
     let port = port.unwrap_or_else(|| state.storage.settings().proxy_port);
     let server = start_http(state, ServerConfig { host, port }).await?;
     println!(

@@ -174,11 +174,4 @@ function clear() {
   word-break: break-word;
   overflow-x: auto;
 }
-
-@media (max-width: 920px) {
-  .log-detail {
-    margin-left: 72px;
-    padding-left: 18px;
-  }
-}
 </style>

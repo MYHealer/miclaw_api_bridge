@@ -14,13 +14,16 @@ DATA_DIR=/etc/miclaw_api_bridge
 
 start_service() {
 	# Defaults; overridable via /etc/config/miclaw_api_bridge
-	local enabled host port verbose
+	local enabled host port verbose tls tls_cert tls_key
 
 	config_load "$CONF"
 	config_get_bool enabled  main enabled 1
 	config_get      host     main host    "0.0.0.0"
 	config_get      port     main port    "8765"
 	config_get_bool verbose  main verbose 0
+	config_get_bool tls      main tls     0
+	config_get      tls_cert main tls_cert ""
+	config_get      tls_key  main tls_key  ""
 
 	[ "$enabled" = "1" ] || {
 		echo "miclaw_api_bridge disabled in /etc/config/$CONF" >&2
@@ -31,6 +34,12 @@ start_service() {
 
 	procd_open_instance
 	procd_set_param command "$PROG" server --host "$host" --port "$port"
+
+	# HTTPS: --tls auto-generates a self-signed cert under $DATA_DIR/config;
+	# optionally point to your own PEM cert/key.
+	[ "$tls" = "1" ] && procd_append_param command --tls
+	[ -n "$tls_cert" ] && procd_append_param command --tls-cert "$tls_cert"
+	[ -n "$tls_key" ] && procd_append_param command --tls-key "$tls_key"
 
 	# No OS keyring on OpenWrt → store session on disk.
 	procd_set_param env \

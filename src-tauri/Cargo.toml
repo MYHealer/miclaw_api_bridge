@@ -36,6 +36,13 @@ url = "2.5"
 
 # http server (axum proxy)
 axum = { version = "0.7", features = ["json", "macros"] }
+# axum-server provides TLS. Use the *no-provider* feature and install the ring
+# CryptoProvider ourselves so we don't drag in a second provider (aws-lc-rs);
+# reqwest's rustls-tls already pins the tree to ring.
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# self-signed cert generation; ring backend to match the single provider.
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 hyper = "1.5"
@@ -47,10 +54,13 @@ serde_json = "1.0"
 # crypto / encoding
 md-5 = "0.10"
 sha1 = "0.10"
+sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
 aes-gcm = "0.10"
 rand = "0.8"
+# admin password hashing
+argon2 = "0.5"
 
 # storage
 keyring = { version = "3.6", features = ["apple-native", "windows-native", "linux-native-async-persistent", "tokio", "crypto-rust"] }

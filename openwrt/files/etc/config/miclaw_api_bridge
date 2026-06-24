@@ -8,3 +8,9 @@ config miclaw_api_bridge 'main'
 	option port '8765'
 	# 1 = RUST_LOG debug, 0 = info
 	option verbose '0'
+	# 1 = serve over HTTPS (self-signed cert auto-generated on first start),
+	# 0 = plain HTTP.
+	option tls '0'
+	# Optional: use your own PEM cert/key instead of the self-signed one.
+	#option tls_cert '/etc/miclaw_api_bridge/cert.pem'
+	#option tls_key '/etc/miclaw_api_bridge/key.pem'
